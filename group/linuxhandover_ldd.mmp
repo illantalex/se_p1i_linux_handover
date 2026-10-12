@@ -7,7 +7,7 @@ TARGETTYPE      ldd
 // returned KErrAlreadyExists, i.e. it was already resident from a prior run).
 UID             0x100000AF 0x101F4563
 
-CAPABILITY      CommDD
+CAPABILITY      CommDD DiskAdmin
 ALWAYS_BUILD_AS_ARM
 
 // Use ONLY the self-consistent khs kernel headers; adding \epoc32\include pulls in

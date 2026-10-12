@@ -13,6 +13,12 @@ _LIT(KLogFile, "C:\\linuxhandover.log");
 
 const TInt KMaxPayload = 4 * 1024 * 1024;
 
+// RFs::FinaliseDrives() is exported by efsrv.dll (efsrv.dso has _ZN3RFs14FinaliseDrivesEv),
+// but the UIQ 3.1 SDK's f32file.h does not declare it. A member function gets `this` as its
+// first argument, so a free function bound to the same symbol is call-compatible. Needs
+// DiskAdmin.
+TInt RFsFinaliseDrives(RFs* aFs) __asm__("_ZN3RFs14FinaliseDrivesEv");
+
 static void MainL() {
     RFs fs;
     User::LeaveIfError(fs.Connect());
@@ -88,18 +94,34 @@ static void MainL() {
     TPtr8 payloadPtr = payloadBuf->Des();
     User::LeaveIfError(payloadFile.Read(payloadPtr, payloadSize));
 
-    logBuf.Copy(_L8("Read complete. Initiating handover...\r\n"));
+    logBuf.Copy(_L8("Read complete. Finalising drives...\r\n"));
     logFile.Write(logBuf);
     logFile.Flush();
+
+    // Linux takes over without Symbian shutting down, which for the file systems is like
+    // pulling the battery. Close our files and finalise every drive (D:, which the payload
+    // came from, included) so no FAT is left dirty. Finalise, log the result, then finalise
+    // again, because writing the log dirties C: once more.
+    payloadFile.Close();
+    r = RFsFinaliseDrives(&fs);
+    logBuf.Format(_L8("FinaliseDrives: %d\r\nInitiating handover...\r\n"), r);
+    logFile.Write(logBuf);
+    logFile.Flush();
+    logFile.Close();
+    RFsFinaliseDrives(&fs);
 
     // Handover to the bare-metal payload at physical 0x80600000.
     // This call does not return.
     r = handover.Handover(*payloadBuf, 0x80600000);
 
     // If we get here, handover failed.
-    logBuf.Format(_L8("Handover returned (error): %d\r\n"), r);
-    logFile.Write(logBuf);
-    logFile.Flush();
+    if (logFile.Open(fs, KLogFile, EFileWrite | EFileShareAny) == KErrNone) {
+        TInt pos = 0;
+        logFile.Seek(ESeekEnd, pos);
+        logBuf.Format(_L8("Handover returned (error): %d\r\n"), r);
+        logFile.Write(logBuf);
+        logFile.Flush();
+    }
 
     CleanupStack::PopAndDestroy(5, &fs);  // payloadBuf, payloadFile, handover, logFile, fs
 }

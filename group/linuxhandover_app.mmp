@@ -10,7 +10,7 @@ TARGETTYPE      exe
 UID             0 0x101F4564
 EPOCHEAPSIZE    0x1000 0x400000
 
-CAPABILITY      CommDD
+CAPABILITY      CommDD DiskAdmin
 
 SOURCEPATH      ..\src
 SOURCE          linuxhandover_app.cpp
