@@ -82,7 +82,21 @@
 .equ MSTIM_MATCH0,        0x18
 .equ TIMCLK_CTRL,         0x400040BC
 
-.equ NREGS,               31            /* words in regsave, labels in reglabels */
+/* Clock/power block (for HCLK) and the two I2C controllers (Philips IP3204, i2c-pnx). */
+.equ CLKPWR_BASE,         0x40004000
+.equ HCLKDIV_CTRL_OFS,    0x40
+.equ PWR_CTRL_OFS,        0x44
+.equ SYSCLK_CTRL_OFS,     0x50
+.equ HCLKPLL_CTRL_OFS,    0x58
+.equ I2CCLK_CTRL_OFS,     0xAC          /* bit 0/1: I2C1/I2C2 clock enable */
+.equ I2C1_BASE,           0x400A0000
+.equ I2C2_BASE,           0x400A8000
+.equ I2C_CTL,             0x08
+.equ I2C_CKL,             0x0C
+.equ I2C_CKH,             0x10
+.equ I2C_TFFIE,           0x80          /* TX FIFO not full: asserts at once when idle */
+
+.equ NREGS,               51            /* words in regsave, labels in reglabels */
 .equ MSTIM_WAIT,          0x400000      /* poll budget for a match flag, roughly 1 s */
 
 _start:
@@ -191,7 +205,7 @@ _start:
        Use adr (PC-relative): the handover LDD loads this blob at an
        arbitrary physical address, not its 0x80600000 link address, so an
        absolute `ldr r4,=message' would point into the wrong memory. */
-    adr r4, message
+    adrl r4, message
     bl  puts
 
     /* 6a) Line-level test for a multimeter on UART6 TX (IrDA module pin 3), twice:
@@ -214,7 +228,7 @@ _start:
     ldr r3, [r12, #UART_LCR]
     bic r3, r3, #LCR_BREAK
     str r3, [r12, #UART_LCR]
-    adr r4, message
+    adrl r4, message
     bl  puts
 
     /* 6b) Register dump. Everything is read into regsave first and printed afterwards,
@@ -316,6 +330,76 @@ _start:
     str r2, [r7, #120]
     mov r3, #0
     str r3, [r12, #UART_IER_DLM]
+
+    /* I2C: Symbian's clock tree (to work out HCLK, which clocks I2C) and I2C settings,
+       then turn both I2C clocks on for Linux (there is no clock driver) and find their
+       interrupt lines the same way as the UARTs', with the TX-FIFO-not-full interrupt. */
+    ldr r8, =CLKPWR_BASE
+    ldr r2, [r8, #HCLKDIV_CTRL_OFS]
+    str r2, [r7, #124]
+    ldr r2, [r8, #PWR_CTRL_OFS]
+    str r2, [r7, #128]
+    ldr r2, [r8, #SYSCLK_CTRL_OFS]
+    str r2, [r7, #132]
+    ldr r2, [r8, #HCLKPLL_CTRL_OFS]
+    str r2, [r7, #136]
+    ldr r2, [r8, #I2CCLK_CTRL_OFS]
+    str r2, [r7, #140]
+    orr r2, r2, #3
+    str r2, [r8, #I2CCLK_CTRL_OFS]
+
+    ldr r8, =I2C1_BASE
+    ldr r10, =I2C2_BASE
+    ldr r2, [r8, #I2C_CTL]
+    str r2, [r7, #144]
+    ldr r2, [r8, #I2C_CKL]
+    str r2, [r7, #148]
+    ldr r2, [r8, #I2C_CKH]
+    str r2, [r7, #152]
+    ldr r2, [r10, #I2C_CTL]
+    str r2, [r7, #156]
+    ldr r2, [r10, #I2C_CKL]
+    str r2, [r7, #160]
+    ldr r2, [r10, #I2C_CKH]
+    str r2, [r7, #164]
+
+    ldr r9, =MIC_BASE
+    ldr r11, =SIC1_BASE
+    ldr r1, =SIC2_BASE
+    ldr r2, [r9, #IC_RAW]
+    str r2, [r7, #168]
+    ldr r2, [r11, #IC_RAW]
+    str r2, [r7, #172]
+    ldr r2, [r1, #IC_RAW]
+    str r2, [r7, #176]
+
+    ldr r4, [r8, #I2C_CTL]
+    orr r3, r4, #I2C_TFFIE
+    str r3, [r8, #I2C_CTL]
+    mov r2, #0x100
+4:  subs r2, r2, #1
+    bne 4b
+    ldr r2, [r9, #IC_RAW]
+    str r2, [r7, #180]
+    ldr r2, [r11, #IC_RAW]
+    str r2, [r7, #184]
+    ldr r2, [r1, #IC_RAW]
+    str r2, [r7, #188]
+    str r4, [r8, #I2C_CTL]
+
+    ldr r4, [r10, #I2C_CTL]
+    orr r3, r4, #I2C_TFFIE
+    str r3, [r10, #I2C_CTL]
+    mov r2, #0x100
+4:  subs r2, r2, #1
+    bne 4b
+    ldr r2, [r9, #IC_RAW]
+    str r2, [r7, #192]
+    ldr r2, [r11, #IC_RAW]
+    str r2, [r7, #196]
+    ldr r2, [r1, #IC_RAW]
+    str r2, [r7, #200]
+    str r4, [r10, #I2C_CTL]
 
     adrl r8, reglabels
     mov r9, #0
@@ -488,6 +572,26 @@ reglabels:
     REGLABEL "SIC1 RAW u6   "
     REGLABEL "SIC2 RAW base "
     REGLABEL "SIC2 RAW u6   "
+    REGLABEL "HCLKDIV_CTRL  "
+    REGLABEL "PWR_CTRL      "
+    REGLABEL "SYSCLK_CTRL   "
+    REGLABEL "HCLKPLL_CTRL  "
+    REGLABEL "I2CCLK (os)   "
+    REGLABEL "I2C1 CTL (os) "
+    REGLABEL "I2C1 CKL      "
+    REGLABEL "I2C1 CKH      "
+    REGLABEL "I2C2 CTL (os) "
+    REGLABEL "I2C2 CKL      "
+    REGLABEL "I2C2 CKH      "
+    REGLABEL "i2c MIC base  "
+    REGLABEL "i2c SIC1 base "
+    REGLABEL "i2c SIC2 base "
+    REGLABEL "i2c1 MIC      "
+    REGLABEL "i2c1 SIC1     "
+    REGLABEL "i2c1 SIC2     "
+    REGLABEL "i2c2 MIC      "
+    REGLABEL "i2c2 SIC1     "
+    REGLABEL "i2c2 SIC2     "
 
 .align 2
 regsave:
