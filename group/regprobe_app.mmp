@@ -1,0 +1,16 @@
+// regprobe_app.mmp -- user-side test program (no UI; start it from X-plore).
+
+TARGET          regprobe.exe
+TARGETTYPE      exe
+UID             0x100039CE 0xE0005A50
+VENDORID        0
+CAPABILITY      ALL -TCB
+EPOCSTACKSIZE   0x5000          // 4 KB log backlog + 1 KB register block on the stack
+
+USERINCLUDE     ..\inc
+SYSTEMINCLUDE   \epoc32\include
+
+SOURCEPATH      ..\src
+SOURCE          regprobe_app.cpp
+
+LIBRARY         euser.lib efsrv.lib hal.lib

@@ -1,0 +1,23 @@
+// linuxhandover_app.mmp
+// User-mode test program for bare-metal handover LDD.
+
+TARGET          linuxhandover.exe
+TARGETTYPE      exe
+// Leave these alone: this exe demonstrably launched, created its log and loaded the LDD
+// with these UIDs. (A 0x101F.... UID3 is in the protected range, which in theory a
+// self-signed SIS cannot install -- but this device's installer accepts it, so changing
+// the UIDs only risks a conflicting reinstall over the already-registered package.)
+UID             0 0x101F4564
+EPOCHEAPSIZE    0x1000 0x400000
+
+CAPABILITY      CommDD
+
+SOURCEPATH      ..\src
+SOURCE          linuxhandover_app.cpp
+
+USERINCLUDE     ..\inc
+
+SYSTEMINCLUDE   \epoc32\include
+
+LIBRARY         euser.lib
+LIBRARY         efsrv.lib

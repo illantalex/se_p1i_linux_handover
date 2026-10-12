@@ -1,0 +1,31 @@
+// linuxhandover_ldd.mmp
+// Bare-metal handover LDD: disables watchdog/IRQ/FIQ/MMU/caches and jumps to a payload.
+
+TARGET          linuxhandover.ldd
+TARGETTYPE      ldd
+// Leave these alone: this LDD demonstrably loaded with these UIDs (LoadLogicalDevice
+// returned KErrAlreadyExists, i.e. it was already resident from a prior run).
+UID             0x100000AF 0x101F4563
+
+CAPABILITY      CommDD
+ALWAYS_BUILD_AS_ARM
+
+// Use ONLY the self-consistent khs kernel headers; adding \epoc32\include pulls in
+// the SDK's older e32def.h/e32ldr.h/e32event.h, which collide with the khs set
+// (redefinitions, and missing TUintPtr). Mirror regprobe_ldd.mmp exactly.
+SOURCEPATH      ..\src
+SOURCE          linuxhandover_ldd.cpp
+
+USERINCLUDE     ..\inc
+
+SYSTEMINCLUDE   \epoc32\include\khs
+SYSTEMINCLUDE   \epoc32\include\khs\kernel
+SYSTEMINCLUDE   \epoc32\include\khs\kernel\arm
+SYSTEMINCLUDE   \epoc32\include\khs\nkern
+SYSTEMINCLUDE   \epoc32\include\khs\nkern\arm
+SYSTEMINCLUDE   \epoc32\include\khs\memmodel\epoc
+
+LIBRARY         ekern.lib
+
+MACRO           __KERNEL_MODE__
+MACRO           __MEMMODEL_MOVING__

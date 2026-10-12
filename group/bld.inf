@@ -1,0 +1,9 @@
+// bld.inf -- build with: bldmake bldfiles && abld build gcce urel
+PRJ_PLATFORMS
+GCCE
+
+PRJ_MMPFILES
+regprobe_ldd.mmp
+regprobe_app.mmp
+linuxhandover_ldd.mmp
+linuxhandover_app.mmp

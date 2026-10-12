@@ -1,0 +1,34 @@
+--- a/kernel/kernel.h
++++ b/kernel/kernel.h
+@@ -1373,9 +1373,9 @@
+ 	IMPORT_C void CheckedOpen();
+ 	IMPORT_C virtual TInt Close(TAny* aPtr);
+ 	IMPORT_C virtual TInt RequestUserHandle(DThread* aThread, TOwnerType aType);
+-	IMPORT_C virtual TInt RequestUserHandle(DThread* aThread, TOwnerType aType, TUint aAttr);
++	// P1i/9.1: no RequestUserHandle(DThread*, TOwnerType, TUint) slot in the 9.1 vtable
+ 	IMPORT_C virtual TInt AddToProcess(DProcess* aProcess);
+-	IMPORT_C virtual TInt AddToProcess(DProcess* aProcess, TUint aAttr);
++	// P1i/9.1: no AddToProcess(DProcess*, TUint) slot in the 9.1 vtable
+ 	IMPORT_C TInt AsyncClose();
+ 	IMPORT_C virtual void DoAppendName(TDes& aName);
+ 	IMPORT_C void DoAppendFullName(TDes& aFullName);
+@@ -1397,7 +1397,7 @@
+ 	inline TUint64 ObjectId() const;		/**< @internalComponent */
+ public:
+ 	/**	@internalComponent */
+-	TInt iAccessCount;			// must be first
++	TInt iAccessCount;			// must be first (+8: DBase is 8 bytes)
+ 
+ 	/**	@internalComponent */
+ 	DObject* iOwner;
+@@ -1420,9 +1420,7 @@
+ 	/**	@internalComponent */
+ 	HBuf* iName;
+ 
+-	/** A unique ID.
+-	    @internalComponent */
+-	TUint64 iObjectId;
++	// P1i/9.1: no iObjectId; 9.1 DObject is 0x18 bytes
+ 
+ 	/**	@internalComponent */
+ //	SMiscNotifierQ* iNotifierQ;

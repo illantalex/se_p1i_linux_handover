@@ -1,0 +1,32 @@
+// regprobe_ldd.mmp -- kernel-side driver.
+//
+// Headers: kernel/eka/include from github.com/SymbianSource/oss.FCL.sf.os.kernelhwsrv, copied
+// whole to \epoc32\include\khs. It is a self-consistent (newer) set, so this build uses it
+// instead of the SDK's own e32 headers; do not copy it over \epoc32\include.
+//
+// ekern.dso: built from ..\lib\ekern91.def (ordinals 1-770 = what the phone exports):
+//   elf2e32 --definput=..\lib\ekern91.def --dso=\epoc32\release\armv5\lib\ekern.dso
+//           --linkas=ekern{000a0000}[100041af].exe
+
+TARGET          regprobe.ldd
+TARGETTYPE      ldd
+UID             0x100000AF 0xE0005A51
+VENDORID        0
+CAPABILITY      ALL
+ALWAYS_BUILD_AS_ARM
+
+MACRO           __KERNEL_MODE__
+MACRO           __MEMMODEL_MOVING__
+
+USERINCLUDE     ..\inc
+SYSTEMINCLUDE   \epoc32\include\khs
+SYSTEMINCLUDE   \epoc32\include\khs\kernel
+SYSTEMINCLUDE   \epoc32\include\khs\kernel\arm
+SYSTEMINCLUDE   \epoc32\include\khs\nkern
+SYSTEMINCLUDE   \epoc32\include\khs\nkern\arm
+SYSTEMINCLUDE   \epoc32\include\khs\memmodel\epoc
+
+SOURCEPATH      ..\src
+SOURCE          regprobe_ldd.cpp
+
+LIBRARY         ekern.lib

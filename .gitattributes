@@ -1,0 +1,3 @@
+# Store every file byte-exact: Windows batch files, Symbian sources and the UTF-16 .pkg
+# keep their CRLF line endings whatever core.autocrlf says.
+* -text
