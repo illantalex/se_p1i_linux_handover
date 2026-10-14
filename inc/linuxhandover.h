@@ -18,7 +18,7 @@ const TInt KLinuxHandoverMajor = 1;
 const TInt KLinuxHandoverMinor = 0;
 const TInt KLinuxHandoverBuild = 0;
 
-const TInt KMaxPayloadSize = 4 * 1024 * 1024;  // 64 KB max bare-metal binary
+const TInt KMaxPayloadSize = 4 * 1024 * 1024;  // stub + zImage
 
 enum TLinuxHandoverControl {
     EHandover,  // a1 = THandover*; loads binary and jumps to it with MMU/caches off

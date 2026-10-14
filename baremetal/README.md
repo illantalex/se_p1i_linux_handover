@@ -13,7 +13,7 @@ machine. It is entered with the MMU still on, inside an identity-mapped section,
 6. jumps to the zImage appended after it (`r0` = 0, `r1` = ~0, `r2` = 0; the DTB is
    appended to the zImage), or parks if there is none.
 
-It is based on the register map and handover notes in `../../NOTES.md`.
+See `../README.md` for how the pieces fit together.
 
 ## Files
 
