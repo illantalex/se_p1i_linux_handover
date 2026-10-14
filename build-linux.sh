@@ -15,6 +15,7 @@
 # Usage:
 #   ./build-linux.sh              build all three stages
 #   ./build-linux.sh nobaremetal  skip the bare-metal payload
+#   ./build-linux.sh payload      only the bare-metal payload (new kernel, app unchanged)
 #   ./build-linux.sh clean        force a full Symbian rebuild (after .mmp-only edits)
 set -e
 
@@ -60,6 +61,7 @@ if [ "$1" != "nobaremetal" ]; then
 		echo "  p1i_linux.bin (stub + zImage-p1i)"
 	fi
 fi
+[ "$1" = "payload" ] && exit 0
 
 echo
 echo "=== Stage 2/3: Symbian LDD + test exe + handover LDD + handover test"
