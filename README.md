@@ -7,7 +7,8 @@ phone back into Symbian.
 
 ## What works in Linux
 
-Linux 6.1 with a BusyBox initramfs, built from the companion kernel repository:
+Linux 6.1 with a BusyBox initramfs, built from the companion kernel repository
+[se_p1i_linux](https://github.com/illantalex/se_p1i_linux):
 
 - framebuffer console on the phone's display, and a shell on it typed on the QWERTZ keypad
   (jog dial = Up/Down, jog press = Enter)
@@ -40,7 +41,7 @@ The app does not return; to get back to Symbian, run `reboot` in Linux or pull t
 - A P1i with the **platform security hack** applied: the package is self-signed and needs
   the `CommDD` and `DiskAdmin` capabilities, which only a hacked phone accepts.
 - A Memory Stick Micro (M2) for the payload.
-- A kernel image `zImage-p1i` from the companion kernel repository.
+- A kernel image `zImage-p1i` built with [se_p1i_linux](https://github.com/illantalex/se_p1i_linux).
 
 ## Installing and running
 
