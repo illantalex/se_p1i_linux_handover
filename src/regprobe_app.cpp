@@ -260,6 +260,12 @@ static void RomDump(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
 		aLog.Line(_L8("no ROM header"));
 		return;
 		}
+	TEntry existing;
+	if (aFs.Entry(KRomDumpFile, existing) == KErrNone)
+		{
+		aLog.Line(_L8("rom.bin already on the card, not dumped again"));
+		return;
+		}
 	TUint32 base = 0, size = 0;
 	for (TInt i = 16; i < 63; ++i)
 		if (h[i] == k.iRomHeader && h[i + 1] > 0x100000 && h[i + 1] <= KRomSizeMax)
@@ -315,6 +321,56 @@ static void RomDump(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
 	DumpVirt(aProbe, aLog, _L8("dspextension tail"), 0xF83729D0, 32);
 	}
 
+// The DSP while Symbian plays sound: its host-port registers (not REP0-2, reading clears
+// them), the audio clock registers, and the shared buffer three times one second apart, to
+// D:\other\dspshared1..3.bin. The shared buffer holds the parameter blocks of the last
+// messages (use case at 0x810) and the PCM areas, so the snapshots show which area streams.
+static void DspSnapshot(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
+	{
+	aLog.Line(_L8("== dsp snapshot"));
+	static const TUint16 apbp[] = { 0x08, 0x0C, 0x10, 0x14, 0x1C, 0x20, 0x28, 0x30 };
+	for (TUint i = 0; i < sizeof(apbp) / sizeof(apbp[0]); ++i)
+		{
+		TUint32 v = 0;
+		aProbe.Peek(0x400C0000 + apbp[i], v);
+		aLog.Line(_L8("APBP+%02x %04x"), apbp[i], v & 0xFFFF);
+		}
+	aLog.Line(_L8("-- AUDIOCONFIG 0x400E8000"));
+	DumpBlock(aProbe, aLog, 0x400E8000, 0x80 / 4);
+
+	TUint32 obj = 0, shared = 0, phys = KPhysInvalid;
+	if (aProbe.PeekVirt(0x64011CE0, &obj, 1) != KErrNone || !obj ||
+	    aProbe.PeekVirt(obj + 0x1B8, &shared, 1) != KErrNone || !shared)
+		{
+		aLog.Line(_L8("no dspextension shared buffer"));
+		return;
+		}
+	aProbe.LinToPhys(shared, 0, &phys, 1);
+	aLog.Line(_L8("shared buffer: linear %08x physical %08x"), shared, phys);
+
+	TBuf<32> name;
+	TUint32 buf[KMaxPeekWords];
+	TPtrC8 out((const TUint8*)buf, sizeof(buf));
+	for (TInt n = 1; n <= 3; ++n)
+		{
+		name.Format(_L("D:\\other\\dspshared%d.bin"), n);
+		RFile f;
+		if (f.Replace(aFs, name, EFileWrite) != KErrNone)
+			continue;
+		for (TUint32 off = 0; off < 0x6000; off += sizeof(buf))
+			{
+			if (aProbe.PeekVirt(shared + off, buf, KMaxPeekWords) != KErrNone)
+				Mem::FillZ(buf, sizeof(buf));
+			f.Write(out);
+			}
+		f.Close();
+		TUint32 sem = 0;
+		aProbe.Peek(0x400C001C, sem);
+		aLog.Line(_L8("snapshot %d written, SEM %04x"), n, sem & 0xFFFF);
+		User::After(1000000);
+		}
+	}
+
 static TInt Run(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
 	{
 	aLog.Line(_L8("== before"));
@@ -368,6 +424,7 @@ static TInt Run(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
 	aLog.Line(_L8("== clock block"));
 	DumpBlock(aProbe, aLog, KPhysClkBase, 0x100 / 4);   // 256 bytes, aliased above that
 
+	DspSnapshot(aProbe, aLog, aFs);
 	Survey(aProbe, aLog);
 	RomDump(aProbe, aLog, aFs);
 	aLog.Line(_L8("== done"));
