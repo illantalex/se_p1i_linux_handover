@@ -21,3 +21,4 @@ SYSTEMINCLUDE   \epoc32\include
 
 LIBRARY         euser.lib
 LIBRARY         efsrv.lib
+LIBRARY         mediaclientaudiostream.lib
