@@ -6,6 +6,7 @@ UID             0x100039CE 0xE0005A50
 VENDORID        0
 CAPABILITY      ALL -TCB
 EPOCSTACKSIZE   0x5000          // 4 KB log backlog + 1 KB register block on the stack
+EPOCHEAPSIZE    0x1000 0x200000 // dsptrace keeps up to 3000 samples (~450 KB) in RAM
 
 USERINCLUDE     ..\inc
 SYSTEMINCLUDE   \epoc32\include

@@ -421,8 +421,106 @@ static void DspChannelScan(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
 	aLog.Line(_L8("%d channel objects found"), found);
 	}
 
+// Trace of the DSP host port and the audio block while Symbian starts playing, to find the
+// order of the messages and any register writes around them: for KTraceSeconds the
+// registers are polled in a tight loop, and every change is kept with its time (in RAM, to
+// keep the loop fast) and logged at the end. Started instead of the normal run when
+// D:\other\dsptrace.txt exists: run regprobe, then start playback within the time.
+// Not part of the trigger (they change all the time): SEM (dspcontrolldd's 200 Hz tick on
+// bit 14) and the audio block's counters at 0x28 and 0x40. REP0-2 are not read (it clears
+// them).
+_LIT(KTraceTrigger, "D:\\other\\dsptrace.txt");
+const TInt KTraceSeconds = 20;
+const TInt KTraceMax = 3000;
+const TInt KTraceApbp = 7;
+const TInt KTraceAudio = 0x80 / 4;
+
+struct TTraceEntry
+	{
+	TUint32 iTime;
+	TUint16 iApbp[KTraceApbp];
+	TUint32 iAudio[KTraceAudio];
+	};
+
+static void DspTrace(RRegProbe& aProbe, TLog& aLog)
+	{
+	static const TUint8 apbp[KTraceApbp] = { 0x08, 0x0C, 0x14, 0x20, 0x28, 0x30, 0x1C };
+	static const char* const names[KTraceApbp] = { "PCFG", "PSTS", "PMASK", "CMD0", "CMD1",
+	                                                "CMD2", "SEM" };
+	const TInt KSem = 6;
+	TTraceEntry* e = new TTraceEntry[KTraceMax];
+	if (!e)
+		{
+		aLog.Line(_L8("dsptrace: no memory"));
+		return;
+		}
+	TInt freq = 0;
+	HAL::Get(HALData::EFastCounterFrequency, freq);
+	aLog.Line(_L8("== dsptrace: %d s, start playback now (fast counter %d Hz)"), KTraceSeconds,
+	          freq);
+	TUint32 start = User::FastCounter();
+	TUint32 end = start + (TUint32)freq * KTraceSeconds;
+	TInt n = 0, samples = 0;
+	TTraceEntry cur;
+	while ((TInt32)(User::FastCounter() - end) < 0 && n < KTraceMax)
+		{
+		for (TInt i = 0; i < KTraceApbp; ++i)
+			{
+			TUint32 v = 0;
+			aProbe.Peek(0x400C0000 + apbp[i], v);
+			cur.iApbp[i] = (TUint16)v;
+			}
+		aProbe.PeekBlock(0x400E8000, cur.iAudio, KTraceAudio);
+		cur.iTime = User::FastCounter() - start;
+		++samples;
+		TBool changed = (n == 0);
+		if (!changed)
+			{
+			const TTraceEntry& p = e[n - 1];
+			for (TInt i = 0; i < KTraceApbp && !changed; ++i)
+				changed = i != KSem && cur.iApbp[i] != p.iApbp[i];
+			for (TInt i = 0; i < KTraceAudio && !changed; ++i)
+				changed = i != 0x28 / 4 && i != 0x40 / 4 && cur.iAudio[i] != p.iAudio[i];
+			}
+		if (changed)
+			e[n++] = cur;
+		}
+	aLog.Line(_L8("dsptrace: %d samples, %d changes (%d max)"), samples, n, KTraceMax);
+	for (TInt k = 0; k < n; ++k)
+		{
+		TBuf8<136> line;   // TLog::Line formats into 160 bytes, CR LF included
+		line.Format(_L8("%8u us"), (TUint32)((TUint64)e[k].iTime * 1000000 / (freq ? freq : 1)));
+		for (TInt i = 0; i < KTraceApbp; ++i)
+			if (k == 0 || e[k].iApbp[i] != e[k - 1].iApbp[i])
+				{
+				TPtrC8 name((const TUint8*)names[i]);
+				line.AppendFormat(_L8(" %S=%04x"), &name, e[k].iApbp[i]);
+				}
+		for (TInt i = 0; i < KTraceAudio; ++i)
+			if (k == 0 || e[k].iAudio[i] != e[k - 1].iAudio[i])
+				{
+				if (line.Length() > line.MaxLength() - 20)
+					{
+					aLog.Line(_L8("%S"), &line);
+					line.Copy(_L8("           "));
+					}
+				line.AppendFormat(_L8(" A%02x=%x"), i * 4, e[k].iAudio[i]);
+				}
+		aLog.Line(_L8("%S"), &line);
+		}
+	delete[] e;
+	aLog.Line(_L8("== dsptrace done"));
+	}
+
 static TInt Run(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
 	{
+	TEntry trigger;
+	if (aFs.Entry(KTraceTrigger, trigger) == KErrNone)
+		{
+		DspTrace(aProbe, aLog);
+		return KErrNone;
+		}
+
 	aLog.Line(_L8("== before"));
 	Reg(aProbe, aLog, _L8("UART_CTRL"), KPhysUartCtrl);
 	Reg(aProbe, aLog, _L8("UART_CLKMODE"), KPhysUartClkMode);
