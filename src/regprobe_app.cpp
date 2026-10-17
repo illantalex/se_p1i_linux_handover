@@ -435,12 +435,14 @@ const TInt KTraceSeconds = 60;
 const TInt KTraceMax = 3000;
 const TInt KTraceApbp = 7;
 const TInt KTraceAudio = 0x80 / 4;
+const TInt KTraceDesc = 8;   // DSP-written stream descriptor at shared + 0x440 (IRAM)
 
 struct TTraceEntry
 	{
 	TUint32 iTime;
 	TUint16 iApbp[KTraceApbp];
 	TUint32 iAudio[KTraceAudio];
+	TUint32 iDesc[KTraceDesc];
 	};
 
 static void DspTrace(RRegProbe& aProbe, TLog& aLog)
@@ -449,12 +451,20 @@ static void DspTrace(RRegProbe& aProbe, TLog& aLog)
 	static const char* const names[KTraceApbp] = { "PCFG", "PSTS", "PMASK", "CMD0", "CMD1",
 	                                                "CMD2", "SEM" };
 	const TInt KSem = 6;
+	TTraceEntry cur;
 	TTraceEntry* e = new TTraceEntry[KTraceMax];
 	if (!e)
 		{
 		aLog.Line(_L8("dsptrace: no memory"));
 		return;
 		}
+	// The shared buffer (internal SRAM) by its kernel linear address: EPeekBlock only maps
+	// the I/O range.
+	TUint32 obj = 0, shared = 0;
+	if (aProbe.PeekVirt(0x64011CE0, &obj, 1) != KErrNone || !obj ||
+	    aProbe.PeekVirt(obj + 0x1B8, &shared, 1) != KErrNone)
+		shared = 0;
+	Mem::FillZ(&cur, sizeof(cur));
 	TInt freq = 0;
 	HAL::Get(HALData::EFastCounterFrequency, freq);
 	aLog.Line(_L8("== dsptrace: %d s, start playback now (fast counter %d Hz)"), KTraceSeconds,
@@ -462,7 +472,6 @@ static void DspTrace(RRegProbe& aProbe, TLog& aLog)
 	TUint32 start = User::FastCounter();
 	TUint32 end = start + (TUint32)freq * KTraceSeconds;
 	TInt n = 0, samples = 0;
-	TTraceEntry cur;
 	while ((TInt32)(User::FastCounter() - end) < 0 && n < KTraceMax)
 		{
 		for (TInt i = 0; i < KTraceApbp; ++i)
@@ -471,7 +480,12 @@ static void DspTrace(RRegProbe& aProbe, TLog& aLog)
 			aProbe.Peek(0x400C0000 + apbp[i], v);
 			cur.iApbp[i] = (TUint16)v;
 			}
-		aProbe.PeekBlock(0x400E8000, cur.iAudio, KTraceAudio);
+		// The LDD keeps one page mapped: the audio block (another page) only every 16th
+		// sample, so the host port is polled without remapping in between.
+		if ((samples & 15) == 0)
+			aProbe.PeekBlock(0x400E8000, cur.iAudio, KTraceAudio);
+		if (shared)
+			aProbe.PeekVirt(shared + 0x440, cur.iDesc, KTraceDesc);
 		cur.iTime = User::FastCounter() - start;
 		++samples;
 		TBool changed = (n == 0);
@@ -482,6 +496,9 @@ static void DspTrace(RRegProbe& aProbe, TLog& aLog)
 				changed = i != KSem && cur.iApbp[i] != p.iApbp[i];
 			for (TInt i = 0; i < KTraceAudio && !changed; ++i)
 				changed = i != 0x28 / 4 && i != 0x40 / 4 && cur.iAudio[i] != p.iAudio[i];
+			// the descriptor's first word only (the rest holds counters)
+			if (!changed && (cur.iDesc[0] != p.iDesc[0] || cur.iDesc[2] != p.iDesc[2]))
+				changed = ETrue;
 			}
 		if (changed)
 			e[n++] = cur;
@@ -507,6 +524,12 @@ static void DspTrace(RRegProbe& aProbe, TLog& aLog)
 					}
 				line.AppendFormat(_L8(" A%02x=%x"), i * 4, e[k].iAudio[i]);
 				}
+		if (k == 0 || e[k].iDesc[0] != e[k - 1].iDesc[0] || e[k].iDesc[2] != e[k - 1].iDesc[2])
+			{
+			aLog.Line(_L8("%S"), &line);
+			line.Format(_L8("            D440=%08x %08x %08x %08x"), e[k].iDesc[0],
+			            e[k].iDesc[1], e[k].iDesc[2], e[k].iDesc[3]);
+			}
 		aLog.Line(_L8("%S"), &line);
 		}
 	delete[] e;
@@ -519,6 +542,10 @@ static TInt Run(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
 	if (aFs.Entry(KTraceTrigger, trigger) == KErrNone)
 		{
 		DspTrace(aProbe, aLog);
+		// what the sound left: shared buffer (dspshared1-3.bin), last message per request
+		// (dspchan<n>.bin)
+		DspSnapshot(aProbe, aLog, aFs);
+		DspChannelScan(aProbe, aLog, aFs);
 		return KErrNone;
 		}
 
