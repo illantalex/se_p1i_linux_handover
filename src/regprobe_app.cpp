@@ -425,12 +425,13 @@ static void DspChannelScan(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
 // order of the messages and any register writes around them: for KTraceSeconds the
 // registers are polled in a tight loop, and every change is kept with its time (in RAM, to
 // keep the loop fast) and logged at the end. Started instead of the normal run when
-// D:\other\dsptrace.txt exists: run regprobe, then start playback within the time.
+// D:\other\dsptrace.txt exists: run regprobe, then make the phone play a sound within the
+// time (regprobe blocks the UI, so from outside: call it or send it an SMS for the tone).
 // Not part of the trigger (they change all the time): SEM (dspcontrolldd's 200 Hz tick on
 // bit 14) and the audio block's counters at 0x28 and 0x40. REP0-2 are not read (it clears
 // them).
 _LIT(KTraceTrigger, "D:\\other\\dsptrace.txt");
-const TInt KTraceSeconds = 20;
+const TInt KTraceSeconds = 60;
 const TInt KTraceMax = 3000;
 const TInt KTraceApbp = 7;
 const TInt KTraceAudio = 0x80 / 4;
