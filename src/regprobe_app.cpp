@@ -371,6 +371,56 @@ static void DspSnapshot(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
 		}
 	}
 
+// dspcontrolldd's channel object while Symbian plays sound, to D:\other\dspchan<n>.bin. Each
+// of its 49 requests has a fixed 24-byte DSP message slot at +0xAC + 24 * request (type byte
+// at +8, p0/p1 halfwords at +0xC/+0xE) that keeps the last message sent, so the dump shows
+// which messages the audio server used and with which parameters. Found in the kernel heap
+// by its vtables, set by the constructor at 0xF83735B8: +0 0xF83760BC, +0x50 0xF8376114.
+static void DspChannelScan(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
+	{
+	aLog.Line(_L8("== dspcontrolldd channel scan"));
+	const TUint32 KHeapStart = 0x64000000, KHeapEnd = 0x65000000;
+	const TUint32 KVtbl = 0xF83760BC, KVtbl2 = 0xF8376114;
+	const TInt KObjWords = 0x800 / 4;
+	TUint32 buf[KMaxPeekWords], obj[KObjWords];
+	TPtrC8 out((const TUint8*)obj, sizeof(obj));
+	TInt found = 0;
+	for (TUint32 blk = KHeapStart; blk < KHeapEnd && found < 4; blk += KScanStep)
+		{
+		TUint32 phys = KPhysInvalid;
+		if (aProbe.LinToPhys(blk, 0, &phys, 1) != KErrNone || phys == KPhysInvalid)
+			continue;
+		for (TUint32 at = blk; at < blk + KScanStep && found < 4; at += sizeof(buf))
+			{
+			if (aProbe.PeekVirt(at, buf, KMaxPeekWords) != KErrNone)
+				continue;
+			for (TInt i = 0; i < KMaxPeekWords && found < 4; ++i)
+				{
+				if (buf[i] != KVtbl)
+					continue;
+				TUint32 o = at + 4 * i;
+				if (aProbe.PeekVirt(o, obj, KMaxPeekWords) != KErrNone ||
+				    aProbe.PeekVirt(o + 4 * KMaxPeekWords, obj + KMaxPeekWords,
+				                    KObjWords - KMaxPeekWords) != KErrNone ||
+				    obj[0x50 / 4] != KVtbl2)
+					continue;
+				++found;
+				TBuf<32> name;
+				name.Format(_L("D:\\other\\dspchan%d.bin"), found);
+				RFile f;
+				TInt r = f.Replace(aFs, name, EFileWrite);
+				if (r == KErrNone)
+					{
+					r = f.Write(out);
+					f.Close();
+					}
+				aLog.Line(_L8("channel object at %08x -> dspchan%d.bin: %d"), o, found, r);
+				}
+			}
+		}
+	aLog.Line(_L8("%d channel objects found"), found);
+	}
+
 static TInt Run(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
 	{
 	aLog.Line(_L8("== before"));
@@ -425,6 +475,7 @@ static TInt Run(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
 	DumpBlock(aProbe, aLog, KPhysClkBase, 0x100 / 4);   // 256 bytes, aliased above that
 
 	DspSnapshot(aProbe, aLog, aFs);
+	DspChannelScan(aProbe, aLog, aFs);
 	Survey(aProbe, aLog);
 	RomDump(aProbe, aLog, aFs);
 	aLog.Line(_L8("== done"));
