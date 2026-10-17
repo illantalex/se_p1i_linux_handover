@@ -16,6 +16,9 @@
 #include "regprobe.h"
 
 _LIT(KLogFile, "C:\\regprobe.log");
+_LIT(KRomDumpDir, "D:\\other\\");
+_LIT(KRomDumpFile, "D:\\other\\rom.bin");   // Z: as mapped, for reverse engineering
+const TUint32 KRomSizeMax = 0x04000000;          // sanity limit for the size in the header
 
 const TUint32 KU5ClkX1Y1 = (1 << 8) | 1;   // UART clock = PERIPH_CLK * 1 / 1
 const TUint32 KDivisor   = 7;
@@ -243,7 +246,76 @@ static void Survey(RRegProbe& aProbe, TLog& aLog)
 	DumpBlock(aProbe, aLog, KPhysSic2, 8);
 	}
 
-static TInt Run(RRegProbe& aProbe, TLog& aLog)
+// The core ROM image (Z:) exactly as the kernel maps it, to the memory card. Files copied off
+// Z: lack the tail of their code (e.g. dspextension.dll's shared-area offset table), the
+// mapped image does not. The ROM header holds its own linear address (iRomBase) followed by
+// the size; unmapped pages, if any, are written as zeros.
+static void RomDump(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
+	{
+	aLog.Line(_L8("== rom dump"));
+	TKernelInfo k;
+	TUint32 h[64];
+	if (aProbe.KernelInfo(k) != KErrNone || aProbe.PeekVirt(k.iRomHeader, h, 64) != KErrNone)
+		{
+		aLog.Line(_L8("no ROM header"));
+		return;
+		}
+	TUint32 base = 0, size = 0;
+	for (TInt i = 16; i < 63; ++i)
+		if (h[i] == k.iRomHeader && h[i + 1] > 0x100000 && h[i + 1] <= KRomSizeMax)
+			{
+			base = h[i];
+			size = h[i + 1];
+			aLog.Line(_L8("RomHeader word %d: base %08x size %08x"), i, base, size);
+			break;
+			}
+	if (!size)
+		{
+		aLog.Line(_L8("ROM base/size not found in the header"));
+		return;
+		}
+	aFs.MkDirAll(KRomDumpDir);
+	RFile f;
+	TInt r = f.Replace(aFs, KRomDumpFile, EFileWrite);
+	if (r != KErrNone)
+		{
+		aLog.Line(_L8("rom.bin: %d"), r);
+		return;
+		}
+	TUint32 buf[KMaxPeekWords];
+	TPtrC8 out((const TUint8*)buf, sizeof(buf));
+	TInt holes = 0;
+	for (TUint32 at = base; at < base + size; at += sizeof(buf))
+		{
+		if (aProbe.PeekVirt(at, buf, KMaxPeekWords) != KErrNone)
+			{
+			Mem::FillZ(buf, sizeof(buf));
+			++holes;
+			}
+		r = f.Write(out);
+		if (r != KErrNone)
+			{
+			aLog.Line(_L8("rom.bin write at %08x: %d"), at, r);
+			break;
+			}
+		if (((at - base) & 0xFFFFF) == 0)
+			aLog.Line(_L8("rom dump %08x"), at);
+		}
+	f.Close();
+	aLog.Line(_L8("rom dump done: %d unreadable blocks of %d bytes"), holes, sizeof(buf));
+
+	// The DSP driver's state: global object (shared buffer at +0x1B8) and the shared-area
+	// offset table at the end of dspextension.dll's code.
+	TUint32 obj = 0;
+	if (aProbe.PeekVirt(0x64011CE0, &obj, 1) == KErrNone && obj)
+		{
+		DumpVirt(aProbe, aLog, _L8("dspextension object"), obj, 64);
+		DumpVirt(aProbe, aLog, _L8("dspextension object +0x100"), obj + 0x100, 64);
+		}
+	DumpVirt(aProbe, aLog, _L8("dspextension tail"), 0xF83729D0, 32);
+	}
+
+static TInt Run(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
 	{
 	aLog.Line(_L8("== before"));
 	Reg(aProbe, aLog, _L8("UART_CTRL"), KPhysUartCtrl);
@@ -297,6 +369,7 @@ static TInt Run(RRegProbe& aProbe, TLog& aLog)
 	DumpBlock(aProbe, aLog, KPhysClkBase, 0x100 / 4);   // 256 bytes, aliased above that
 
 	Survey(aProbe, aLog);
+	RomDump(aProbe, aLog, aFs);
 	aLog.Line(_L8("== done"));
 	return KErrNone;
 	}
@@ -324,7 +397,7 @@ static void MainL()
 	User::LeaveIfError(r);
 	CleanupClosePushL(probe);
 
-	Run(probe, log);
+	Run(probe, log, fs);
 
 	CleanupStack::PopAndDestroy(3, &fs);   // probe, file, fs
 	}
