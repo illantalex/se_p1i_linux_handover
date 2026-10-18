@@ -429,13 +429,17 @@ static void DspChannelScan(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
 // time (regprobe blocks the UI, so from outside: call it or send it an SMS for the tone).
 // Not part of the trigger (they change all the time): SEM (dspcontrolldd's 200 Hz tick on
 // bit 14) and the audio block's counters at 0x28 and 0x40. REP0-2 are not read (it clears
-// them).
+// them). Also traced, every 16th sample: the GPIO block (G: inputs incl. headset detect,
+// GPO outputs) and the DSP parameter area (P: shared + 0x800-0x9FF: FEV, gains, filters),
+// e.g. for plugging the headphones in during playback.
 _LIT(KTraceTrigger, "D:\\other\\dsptrace.txt");
 const TInt KTraceSeconds = 60;
-const TInt KTraceMax = 3000;
+const TInt KTraceMax = 1500;
 const TInt KTraceApbp = 7;
 const TInt KTraceAudio = 0x80 / 4;
 const TInt KTraceDesc = 8;   // DSP-written stream descriptor at shared + 0x440 (IRAM)
+const TInt KTraceGpio = 0x20 / 4;    // GPIO block 0x40028000
+const TInt KTraceParam = 0x200 / 4;  // shared + 0x800
 
 struct TTraceEntry
 	{
@@ -443,7 +447,26 @@ struct TTraceEntry
 	TUint16 iApbp[KTraceApbp];
 	TUint32 iAudio[KTraceAudio];
 	TUint32 iDesc[KTraceDesc];
+	TUint32 iGpio[KTraceGpio];
+	TUint32 iParam[KTraceParam];
 	};
+
+// Appends " <tag><offset>=<value>" for each word that differs from aPrev (all if no aPrev),
+// logging and restarting the line when it gets full.
+static void AppendWords(TLog& aLog, TDes8& aLine, const TDesC8& aTag, TUint32 aBase,
+                        const TUint32* aCur, const TUint32* aPrev, TInt aCount)
+	{
+	for (TInt i = 0; i < aCount; ++i)
+		if (!aPrev || aCur[i] != aPrev[i])
+			{
+			if (aLine.Length() > aLine.MaxLength() - 24)
+				{
+				aLog.Line(_L8("%S"), &aLine);
+				aLine.Copy(_L8("           "));
+				}
+			aLine.AppendFormat(_L8(" %S%03x=%x"), &aTag, aBase + i * 4, aCur[i]);
+			}
+	}
 
 static void DspTrace(RRegProbe& aProbe, TLog& aLog)
 	{
@@ -483,7 +506,12 @@ static void DspTrace(RRegProbe& aProbe, TLog& aLog)
 		// The LDD keeps one page mapped: the audio block (another page) only every 16th
 		// sample, so the host port is polled without remapping in between.
 		if ((samples & 15) == 0)
+			{
 			aProbe.PeekBlock(0x400E8000, cur.iAudio, KTraceAudio);
+			aProbe.PeekBlock(0x40028000, cur.iGpio, KTraceGpio);
+			if (shared)
+				aProbe.PeekVirt(shared + 0x800, cur.iParam, KTraceParam);
+			}
 		if (shared)
 			aProbe.PeekVirt(shared + 0x440, cur.iDesc, KTraceDesc);
 		cur.iTime = User::FastCounter() - start;
@@ -499,6 +527,11 @@ static void DspTrace(RRegProbe& aProbe, TLog& aLog)
 			// the descriptor's first word only (the rest holds counters)
 			if (!changed && (cur.iDesc[0] != p.iDesc[0] || cur.iDesc[2] != p.iDesc[2]))
 				changed = ETrue;
+			if (!changed)
+				changed = Mem::Compare((const TUint8*)cur.iGpio, sizeof(cur.iGpio),
+				                       (const TUint8*)p.iGpio, sizeof(p.iGpio)) != 0 ||
+				          Mem::Compare((const TUint8*)cur.iParam, sizeof(cur.iParam),
+				                       (const TUint8*)p.iParam, sizeof(p.iParam)) != 0;
 			}
 		if (changed)
 			e[n++] = cur;
@@ -514,16 +547,13 @@ static void DspTrace(RRegProbe& aProbe, TLog& aLog)
 				TPtrC8 name((const TUint8*)names[i]);
 				line.AppendFormat(_L8(" %S=%04x"), &name, e[k].iApbp[i]);
 				}
-		for (TInt i = 0; i < KTraceAudio; ++i)
-			if (k == 0 || e[k].iAudio[i] != e[k - 1].iAudio[i])
-				{
-				if (line.Length() > line.MaxLength() - 20)
-					{
-					aLog.Line(_L8("%S"), &line);
-					line.Copy(_L8("           "));
-					}
-				line.AppendFormat(_L8(" A%02x=%x"), i * 4, e[k].iAudio[i]);
-				}
+		const TTraceEntry* prev = k ? &e[k - 1] : NULL;
+		AppendWords(aLog, line, _L8("A"), 0, e[k].iAudio, prev ? prev->iAudio : NULL,
+		            KTraceAudio);
+		AppendWords(aLog, line, _L8("G"), 0, e[k].iGpio, prev ? prev->iGpio : NULL,
+		            KTraceGpio);
+		AppendWords(aLog, line, _L8("P"), 0x800, e[k].iParam, prev ? prev->iParam : NULL,
+		            KTraceParam);
 		if (k == 0 || e[k].iDesc[0] != e[k - 1].iDesc[0] || e[k].iDesc[2] != e[k - 1].iDesc[2])
 			{
 			aLog.Line(_L8("%S"), &line);
