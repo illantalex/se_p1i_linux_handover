@@ -75,7 +75,7 @@ wine cmd /c 'C:\p1\linux_handover\build.cmd' $SYMARG
 # change needs "clean" to rebuild -- this check then says so.)
 UREL="$WINEPREFIX/drive_c/Symbian/UIQ3.1SDK/epoc32/release/gcce/urel"
 for spec in regprobe.ldd:regprobe_ldd regprobe.exe:regprobe_app \
-            linuxhandover.ldd:linuxhandover_ldd:linuxhandover \
+            linuxhandover.ldd:linuxhandover_ldd \
             linuxhandover.exe:linuxhandover_app; do
 	t=${spec%%:*}; rest=${spec#*:}; src=${rest%%:*}; mmp=${rest#*:}
 	NEWEST=$(ls -t "$PROJ/src/$src.cpp" "$PROJ/group/$mmp.mmp" "$PROJ"/inc/* | head -n 1)
