@@ -566,9 +566,70 @@ static void DspTrace(RRegProbe& aProbe, TLog& aLog)
 	aLog.Line(_L8("== dsptrace done"));
 	}
 
+// All of Symbian's RAM to the memory card, one file per bank (D:\other\ram_<base>.bin), for
+// finding state that lives in other processes, e.g. BServer's table of modem (OPA) objects.
+// The banks are read from the super page (iRamBootData: base, size, ..., ended by size 0).
+// Started instead of the normal run when D:\other\ramdump.txt exists.
+_LIT(KRamDumpTrigger, "D:\\other\\ramdump.txt");
+
+static void RamDump(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
+	{
+	aLog.Line(_L8("== ram dump"));
+	TKernelInfo k;
+	TUint32 sp[12], banks[16];
+	if (aProbe.KernelInfo(k) != KErrNone || aProbe.PeekVirt(k.iSuperPage, sp, 12) != KErrNone ||
+	    aProbe.PeekVirt(sp[5], banks, 16) != KErrNone)
+		{
+		aLog.Line(_L8("no RAM bank list"));
+		return;
+		}
+	TUint32* buf = new TUint32[KMaxRamWords];
+	if (!buf)
+		{
+		aLog.Line(_L8("no memory"));
+		return;
+		}
+	TPtrC8 out((const TUint8*)buf, KMaxRamWords * sizeof(TUint32));
+	for (TInt i = 0; i + 1 < 16 && banks[i + 1]; i += 2)
+		{
+		TUint32 base = banks[i], size = banks[i + 1];
+		aLog.Line(_L8("bank %08x size %08x"), base, size);
+		TBuf<40> name;
+		name.Format(_L("D:\\other\\ram_%08x.bin"), base);
+		RFile f;
+		TInt r = f.Replace(aFs, name, EFileWrite);
+		if (r != KErrNone)
+			{
+			aLog.Line(_L8("ram file: %d"), r);
+			break;
+			}
+		TInt bad = 0;
+		for (TUint32 at = base; at < base + size && r == KErrNone; at += out.Length())
+			{
+			if (aProbe.PeekRam(at, buf, KMaxRamWords) != KErrNone)
+				{
+				Mem::FillZ(buf, out.Length());
+				++bad;
+				}
+			r = f.Write(out);
+			if (((at - base) & 0x3FFFFF) == 0)
+				aLog.Line(_L8("ram dump %08x"), at);
+			}
+		f.Close();
+		aLog.Line(_L8("bank done: write %d, %d unreadable blocks"), r, bad);
+		}
+	delete[] buf;
+	}
+
 static TInt Run(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
 	{
 	TEntry trigger;
+	if (aFs.Entry(KRamDumpTrigger, trigger) == KErrNone)
+		{
+		RamDump(aProbe, aLog, aFs);
+		aLog.Line(_L8("== done"));
+		return KErrNone;
+		}
 	if (aFs.Entry(KTraceTrigger, trigger) == KErrNone)
 		{
 		DspTrace(aProbe, aLog);

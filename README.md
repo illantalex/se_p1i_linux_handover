@@ -94,6 +94,13 @@ Two parts, built separately:
 used to map the hardware before Linux ran (UART, interrupt and clock registers);
 `regprobe.log` is one of those runs. Both are in the same package.
 
+Modes, picked by a file in `D:\other\` on the memory card:
+
+- `ramdump.txt`: write all of Symbian's RAM to `D:\other\ram_<base>.bin` (about 123 MB),
+  e.g. to find BServer's table of modem objects;
+- `dsptrace.txt`: trace the DSP host port and audio block for 60 s while sound starts;
+- none: the register survey, DSP snapshots and a ROM dump (`D:\other\rom.bin`, once).
+
 ## Serial console (optional)
 
 The kernel log and a shell are also on **UART6** at 115200 8N1. UART6 is the IrDA UART:

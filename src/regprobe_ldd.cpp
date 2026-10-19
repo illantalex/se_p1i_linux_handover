@@ -1,5 +1,6 @@
 // regprobe_ldd.cpp
-// Kernel-side peek/poke of physical I/O registers plus a polled UART5 transmitter.
+// Kernel-side peek/poke of physical I/O registers plus a polled UART5 transmitter, and
+// read-only access to physical RAM.
 // Symbian OS 9.1 (EKA2, moving memory model). No PDD, no units, synchronous requests only,
 // so the channel derives from DLogicalChannelBase and runs in the client thread.
 //
@@ -47,9 +48,12 @@ private:
 	TInt LinToPhys(TAny* a1);
 	TInt PeekVirt(TAny* a1);
 	TInt KernelInfo(TAny* a1);
+	TInt PeekRam(TAny* a1);
 private:
 	DPlatChunkHw* iChunk;   // mapping of one 4 KB page, reused while it matches
 	TUint32 iChunkPhys;
+	DPlatChunkHw* iRamChunk;   // read-only uncached mapping of one KRamWindow of SDRAM
+	TUint32 iRamPhys;
 	};
 
 DRegProbeFactory::DRegProbeFactory()
@@ -77,6 +81,7 @@ TInt DRegProbeFactory::Create(DLogicalChannelBase*& aChannel)
 DRegProbeChannel::~DRegProbeChannel()
 	{
 	Kern::SafeClose((DObject*&)iChunk, NULL);
+	Kern::SafeClose((DObject*&)iRamChunk, NULL);
 	}
 
 TInt DRegProbeChannel::DoCreate(TInt /*aUnit*/, const TDesC8* /*aInfo*/, const TVersion& aVer)
@@ -102,6 +107,7 @@ TInt DRegProbeChannel::Request(TInt aReqNo, TAny* a1, TAny* /*a2*/)
 	case ELinToPhys: return LinToPhys(a1);
 	case EPeekVirt:  return PeekVirt(a1);
 	case EKernelInfo: return KernelInfo(a1);
+	case EPeekRam:   return PeekRam(a1);
 	default:         return KErrNotSupported;
 		}
 	}
@@ -270,6 +276,50 @@ TInt DRegProbeChannel::KernelInfo(TAny* a1)
 	k.iMachineConfig = (TUint32)&Kern::MachineConfig();
 	k.iChannel = (TUint32)this;
 	kumemput32(a1, &k, sizeof(k));
+	return KErrNone;
+	}
+
+// Writes every dirty line of the ARM926 data cache back to RAM ("test and clean" loop), then
+// drains the write buffer, so an uncached read sees what the cached mappings wrote.
+static void CleanDCache()
+	{
+	asm volatile(
+		"1:	mrc p15, 0, r15, c7, c10, 3\n"
+		"	bne 1b\n"
+		"	mov r0, #0\n"
+		"	mcr p15, 0, r0, c7, c10, 4\n"
+		::: "r0", "cc", "memory");
+	}
+
+// Physical SDRAM, e.g. the heaps of other processes, which live at addresses this thread
+// cannot read. The window is mapped read-only and uncached, so nothing here can change RAM.
+TInt DRegProbeChannel::PeekRam(TAny* a1)
+	{
+	TPeekBlock b;
+	kumemget32(&b, a1, sizeof(b));
+	if (b.iCount <= 0 || b.iCount > KMaxRamWords || (b.iPhys & 3) ||
+	    b.iPhys < KPhysRamFirst || b.iPhys + 4 * b.iCount - 1 > KPhysRamLast)
+		return KErrArgument;
+	TUint32 window = b.iPhys & ~(KRamWindow - 1);
+	if (((b.iPhys + 4 * b.iCount - 1) & ~(KRamWindow - 1)) != window)
+		return KErrArgument;
+	if (!iRamChunk || iRamPhys != window)
+		{
+		NKern::ThreadEnterCS();
+		Kern::SafeClose((DObject*&)iRamChunk, NULL);
+		TInt r = DPlatChunkHw::New(iRamChunk, window, KRamWindow,
+		                           EMapAttrSupRo | EMapAttrFullyBlocking);
+		NKern::ThreadLeaveCS();
+		if (r != KErrNone)
+			{
+			iRamChunk = NULL;
+			return r;
+			}
+		iRamPhys = window;
+		}
+	CleanDCache();
+	kumemput32(b.iBuf, (const TAny*)(iRamChunk->LinearAddress() + (b.iPhys - window)),
+	           b.iCount * sizeof(TUint32));
 	return KErrNone;
 	}
 

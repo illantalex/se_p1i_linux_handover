@@ -14,7 +14,7 @@ _LIT(KRegProbeName, "RegProbe");      // logical device name
 _LIT(KRegProbeLddFile, "regprobe");   // c:\sys\bin\regprobe.ldd
 
 const TInt KRegProbeMajor = 1;
-const TInt KRegProbeMinor = 1;   // 1.1: CPU/memory survey requests
+const TInt KRegProbeMinor = 2;   // 1.1: CPU/memory survey requests, 1.2: RAM reads
 const TInt KRegProbeBuild = 0;
 
 const TInt KMaxPeekWords = 256;   // per EPeekBlock call
@@ -33,9 +33,14 @@ const TUint32 KPhysU3Clk        = 0x400040D0;  // U3CLK..U6CLK: [15:8] X, [7:0] 
 const TUint32 KPhysU5Clk        = 0x400040D8;  // UART clock = PERIPH_CLK * X / Y
 const TUint32 KPhysUartClkCtrl  = 0x400040E4;  // UARTCLK_CTRL: bit 0..3 = UART3..6 clock on
 
-// Physical ranges the LDD will map (peripherals only, never RAM)
+// Physical ranges the LDD will map: peripherals for EPeek/EPoke/EPeekBlock, SDRAM (read
+// only) for EPeekRam
 const TUint32 KPhysIoFirst      = 0x20000000;
 const TUint32 KPhysIoLast       = 0x4FFFFFFF;
+const TUint32 KPhysRamFirst     = 0x80000000;
+const TUint32 KPhysRamLast      = 0x8FFFFFFF;
+const TUint32 KRamWindow        = 0x10000;     // EPeekRam maps 64 KB at a time
+const TInt KMaxRamWords         = 1024;        // per EPeekRam call, within one window
 
 // Interrupt controllers, watchdog and timers (LPC32xx layout; MIC/WDT/timers confirmed in use by
 // Symbian, SIC1/SIC2 addresses from LPC32xx only)
@@ -70,7 +75,9 @@ enum TRegProbeControl
 	ELinToPhys,   // a1 = TLinToPhys*; translates iCount addresses iLin + n * iStep into iBuf
 	EPeekVirt,    // a1 = TPeekBlock* with iPhys = kernel linear address; fails with
 	              //      KErrNotFound instead of faulting if a page is unmapped
-	EKernelInfo   // a1 = TKernelInfo* (out)
+	EKernelInfo,  // a1 = TKernelInfo* (out)
+	EPeekRam      // a1 = TPeekBlock* with iPhys in SDRAM; reads up to KMaxRamWords words
+	              //      within one KRamWindow, after writing back the data cache
 	};
 
 const TUint32 KPhysInvalid = 0xFFFFFFFF;   // ELinToPhys result for an unmapped address
@@ -172,6 +179,11 @@ public:
 	inline TInt KernelInfo(TKernelInfo& aInfo)
 		{
 		return DoControl(EKernelInfo, &aInfo);
+		}
+	inline TInt PeekRam(TUint32 aPhys, TUint32* aBuf, TInt aCount)
+		{
+		TPeekBlock b = { aPhys, aCount, aBuf };
+		return DoControl(EPeekRam, &b);
 		}
 	};
 
