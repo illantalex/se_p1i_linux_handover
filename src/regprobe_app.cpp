@@ -426,14 +426,15 @@ static void DspChannelScan(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
 // registers are polled in a tight loop, and every change is kept with its time (in RAM, to
 // keep the loop fast) and logged at the end. Started instead of the normal run when
 // D:\other\dsptrace.txt exists: run regprobe, then make the phone play a sound within the
-// time (regprobe blocks the UI, so from outside: call it or send it an SMS for the tone).
+// time. The loop runs at the lowest thread priority, so it only takes the idle time: the UI
+// and any app (e.g. the FM radio) keep running, at the cost of gaps while they are busy.
 // Not part of the trigger (they change all the time): SEM (dspcontrolldd's 200 Hz tick on
 // bit 14) and the audio block's counters at 0x28 and 0x40. REP0-2 are not read (it clears
 // them). Also traced, every 16th sample: the GPIO block (G: inputs incl. headset detect,
 // GPO outputs) and the DSP parameter area (P: shared + 0x800-0x9FF: FEV, gains, filters),
 // e.g. for plugging the headphones in during playback.
 _LIT(KTraceTrigger, "D:\\other\\dsptrace.txt");
-const TInt KTraceSeconds = 60;
+const TInt KTraceSeconds = 90;
 const TInt KTraceMax = 1500;
 const TInt KTraceApbp = 7;
 const TInt KTraceAudio = 0x80 / 4;
@@ -492,6 +493,10 @@ static void DspTrace(RRegProbe& aProbe, TLog& aLog)
 	HAL::Get(HALData::EFastCounterFrequency, freq);
 	aLog.Line(_L8("== dsptrace: %d s, start playback now (fast counter %d Hz)"), KTraceSeconds,
 	          freq);
+	// At the foreground app's priority, the loop would keep every other app from running.
+	RThread thread;
+	TThreadPriority priority = thread.Priority();
+	thread.SetPriority(EPriorityAbsoluteVeryLow);
 	TUint32 start = User::FastCounter();
 	TUint32 end = start + (TUint32)freq * KTraceSeconds;
 	TInt n = 0, samples = 0;
@@ -536,6 +541,7 @@ static void DspTrace(RRegProbe& aProbe, TLog& aLog)
 		if (changed)
 			e[n++] = cur;
 		}
+	thread.SetPriority(priority);
 	aLog.Line(_L8("dsptrace: %d samples, %d changes (%d max)"), samples, n, KTraceMax);
 	for (TInt k = 0; k < n; ++k)
 		{

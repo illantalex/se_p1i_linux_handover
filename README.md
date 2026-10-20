@@ -98,7 +98,8 @@ Modes, picked by a file in `D:\other\` on the memory card:
 
 - `ramdump.txt`: write all of Symbian's RAM to `D:\other\ram_<base>.bin` (about 123 MB),
   e.g. to find BServer's table of modem objects;
-- `dsptrace.txt`: trace the DSP host port and audio block for 60 s while sound starts;
+- `dsptrace.txt`: trace the DSP host port and audio block for 90 s while sound starts (at the lowest
+  priority, so other apps such as the FM radio can be started meanwhile);
 - none: the register survey, DSP snapshots and a ROM dump (`D:\other\rom.bin`, once).
 
 ## Serial console (optional)
