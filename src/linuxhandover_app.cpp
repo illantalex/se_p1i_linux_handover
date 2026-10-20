@@ -12,6 +12,9 @@
 
 _LIT(KPayloadFile, "D:\\other\\p1i_linux.bin");
 _LIT(KLogFile, "C:\\linuxhandover.log");
+// If this file exists, no audio stream is started: whatever plays keeps the DSP (e.g. the
+// FM radio, whose audio path Linux cannot set up yet). Linux then has no PCM stream.
+_LIT(KNoStreamFile, "D:\\other\\nostream.txt");
 
 const TInt KMaxPayload = 4 * 1024 * 1024;
 
@@ -193,19 +196,24 @@ static void MainL() {
     TPtr8 payloadPtr = payloadBuf->Des();
     User::LeaveIfError(payloadFile.Read(payloadPtr, payloadSize));
 
-    logBuf.Copy(_L8("Read complete. Starting the audio stream...\r\n"));
-    logFile.Write(logBuf);
-    logFile.Flush();
+    TEntry noStream;
+    if (fs.Entry(KNoStreamFile, noStream) == KErrNone) {
+        logBuf.Copy(_L8("Read complete. nostream.txt: no audio stream. Finalising drives...\r\n"));
+    } else {
+        logBuf.Copy(_L8("Read complete. Starting the audio stream...\r\n"));
+        logFile.Write(logBuf);
+        logFile.Flush();
 
-    // Never deleted: the stream has to be running at the handover.
-    CActiveScheduler* scheduler = new (ELeave) CActiveScheduler;
-    CActiveScheduler::Install(scheduler);
-    CSilentStream* stream = NULL;
-    TRAP(r, stream = CSilentStream::NewL());
-    if (r == KErrNone)
-        r = stream->Start();
-    logBuf.Format(_L8("Audio stream: %d, %d buffers played. Finalising drives...\r\n"), r,
-                  stream ? stream->Copied() : 0);
+        // Never deleted: the stream has to be running at the handover.
+        CActiveScheduler* scheduler = new (ELeave) CActiveScheduler;
+        CActiveScheduler::Install(scheduler);
+        CSilentStream* stream = NULL;
+        TRAP(r, stream = CSilentStream::NewL());
+        if (r == KErrNone)
+            r = stream->Start();
+        logBuf.Format(_L8("Audio stream: %d, %d buffers played. Finalising drives...\r\n"), r,
+                      stream ? stream->Copied() : 0);
+    }
     logFile.Write(logBuf);
     logFile.Flush();
 
