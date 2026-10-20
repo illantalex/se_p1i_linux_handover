@@ -427,7 +427,11 @@ static void DspChannelScan(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
 // keep the loop fast) and logged at the end. Started instead of the normal run when
 // D:\other\dsptrace.txt exists: run regprobe, then make the phone play a sound within the
 // time. The loop runs at the lowest thread priority, so it only takes the idle time: the UI
-// and any app (e.g. the FM radio) keep running, at the cost of gaps while they are busy.
+// and any app (e.g. the FM radio) keep running. Such an app keeps the loop from sampling
+// while it starts up, though, which is when the messages come: so the first message (or
+// stream descriptor change) raises the loop to its normal priority for KTraceBoostMs, which
+// the sending servers still preempt, as for a ringtone started from outside. Turn off the
+// key sounds: each key tone is a message too.
 // Not part of the trigger (they change all the time): SEM (dspcontrolldd's 200 Hz tick on
 // bit 14) and the audio block's counters at 0x28 and 0x40. REP0-2 are not read (it clears
 // them). Also traced, every 16th sample: the GPIO block (G: inputs incl. headset detect,
@@ -435,6 +439,7 @@ static void DspChannelScan(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
 // e.g. for plugging the headphones in during playback.
 _LIT(KTraceTrigger, "D:\\other\\dsptrace.txt");
 const TInt KTraceSeconds = 90;
+const TInt KTraceBoostMs = 3000;
 const TInt KTraceMax = 1500;
 const TInt KTraceApbp = 7;
 const TInt KTraceAudio = 0x80 / 4;
@@ -499,9 +504,16 @@ static void DspTrace(RRegProbe& aProbe, TLog& aLog)
 	thread.SetPriority(EPriorityAbsoluteVeryLow);
 	TUint32 start = User::FastCounter();
 	TUint32 end = start + (TUint32)freq * KTraceSeconds;
-	TInt n = 0, samples = 0;
+	TUint32 boostEnd = 0;
+	TBool boosted = EFalse;
+	TInt n = 0, samples = 0, boosts = 0;
 	while ((TInt32)(User::FastCounter() - end) < 0 && n < KTraceMax)
 		{
+		if (boosted && (TInt32)(User::FastCounter() - boostEnd) >= 0)
+			{
+			thread.SetPriority(EPriorityAbsoluteVeryLow);
+			boosted = EFalse;
+			}
 		for (TInt i = 0; i < KTraceApbp; ++i)
 			{
 			TUint32 v = 0;
@@ -539,10 +551,28 @@ static void DspTrace(RRegProbe& aProbe, TLog& aLog)
 				                       (const TUint8*)p.iParam, sizeof(p.iParam)) != 0;
 			}
 		if (changed)
+			{
+			// a message or the stream descriptor: the rest of the sequence follows
+			if (!boosted && n > 0)
+				{
+				const TTraceEntry& p = e[n - 1];
+				TBool msg = cur.iDesc[0] != p.iDesc[0] || cur.iDesc[2] != p.iDesc[2];
+				for (TInt i = 3; i <= 5 && !msg; ++i)
+					msg = cur.iApbp[i] != p.iApbp[i];
+				if (msg)
+					{
+					thread.SetPriority(priority);
+					boosted = ETrue;
+					boostEnd = User::FastCounter() + (TUint32)freq / 1000 * KTraceBoostMs;
+					++boosts;
+					}
+				}
 			e[n++] = cur;
+			}
 		}
 	thread.SetPriority(priority);
-	aLog.Line(_L8("dsptrace: %d samples, %d changes (%d max)"), samples, n, KTraceMax);
+	aLog.Line(_L8("dsptrace: %d samples, %d changes (%d max), %d boosts"), samples, n,
+	          KTraceMax, boosts);
 	for (TInt k = 0; k < n; ++k)
 		{
 		TBuf8<136> line;   // TLog::Line formats into 160 bytes, CR LF included
