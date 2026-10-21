@@ -14,7 +14,11 @@ Linux 6.1 with a BusyBox initramfs, built from the companion kernel repository
   (jog dial = Up/Down, jog press = Enter)
 - display and keypad backlights, camera-flash LED as a torch
 - interrupts, tickless timer, I2C, GPIO, watchdog reboot into Symbian
-- the FM radio (Si4703), once the Symbian FM app has set up the audio path before the handover
+- sound (ALSA, headphones): Linux cannot start a stream on the audio DSP yet, so the app
+  plays silence through Symbian's audio API and hands over with that stream running
+- the FM radio (Si4703): with `D:\other\nostream.txt` on the card the app leaves the DSP
+  alone, so start Symbian's FM radio first; Linux then tunes it and the ALSA control
+  `Audio Source` switches between the radio and ALSA playback
 - serial console on UART6 (needs soldering, see below); not needed for the display console
 
 The display is not initialised by Linux: it keeps the display controller and panel exactly as
