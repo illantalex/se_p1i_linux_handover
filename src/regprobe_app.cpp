@@ -657,9 +657,123 @@ static void RamDump(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
 	delete[] buf;
 	}
 
+// BServer's proxies for the modem's OPA objects (CProxyCCPU, one per modem interface), so
+// that Linux can call those objects after the handover: the modem keeps running, and the
+// session and stub address it gave Symbian stay valid. Every proxy holds two ROM vtable
+// pointers in a row (X), then the interface IID (X + 8, 16 bytes), BServer's proxy/stub
+// manager (X + 0x18), the session (X + 0x1c) and the modem's stub address (X + 0x20); seen
+// in all 172 proxies of a RAM dump (2026-10-19). Started instead of the normal run when
+// D:\other\opascan.txt exists; one line per proxy in D:\other\opa.txt:
+// <phys> <IID bytes in memory order> <session> <stub> [name].
+_LIT(KOpaScanTrigger, "D:\\other\\opascan.txt");
+_LIT(KOpaScanFile, "D:\\other\\opa.txt");
+const TUint32 KOpaProxyVt1 = 0xF818F384;
+const TUint32 KOpaProxyVt2 = 0xF818F3B4;
+const TInt KOpaProxyWords = 9;   // X .. X + 0x20
+
+struct TOpaName
+	{
+	TUint8 iIid[4];   // first bytes of the IID, enough to tell these apart
+	const char* iName;
+	};
+static const TOpaName KOpaNames[] =
+	{
+	{ { 0x06, 0x00, 0x7a, 0xb5 }, "IVibratorDevice" },
+	{ { 0x20, 0x56, 0x38, 0x85 }, "IUsbChargingControl" },
+	{ { 0x0d, 0x44, 0xbf, 0x86 }, "IIndicationDeviceManager" },
+	{ { 0x99, 0xeb, 0x8a, 0xf7 }, "ILedControlDevice" },
+	};
+
+// Reads aCount words of SDRAM, split where EPeekRam's 64 KB windows end.
+static TInt ReadRam(RRegProbe& aProbe, TUint32 aPhys, TUint32* aBuf, TInt aCount)
+	{
+	while (aCount > 0)
+		{
+		TInt n = Min(aCount, (TInt)((KRamWindow - (aPhys & (KRamWindow - 1))) / 4));
+		TInt r = aProbe.PeekRam(aPhys, aBuf, n);
+		if (r != KErrNone)
+			return r;
+		aPhys += n * 4;
+		aBuf += n;
+		aCount -= n;
+		}
+	return KErrNone;
+	}
+
+static void OpaScan(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
+	{
+	aLog.Line(_L8("== opa scan"));
+	TKernelInfo k;
+	TUint32 sp[12], banks[16];
+	if (aProbe.KernelInfo(k) != KErrNone || aProbe.PeekVirt(k.iSuperPage, sp, 12) != KErrNone ||
+	    aProbe.PeekVirt(sp[5], banks, 16) != KErrNone)
+		{
+		aLog.Line(_L8("no RAM bank list"));
+		return;
+		}
+	RFile f;
+	TInt r = f.Replace(aFs, KOpaScanFile, EFileWrite);
+	if (r != KErrNone)
+		{
+		aLog.Line(_L8("opa file: %d"), r);
+		return;
+		}
+	TUint32* buf = new TUint32[KMaxRamWords];
+	if (!buf)
+		{
+		f.Close();
+		aLog.Line(_L8("no memory"));
+		return;
+		}
+	TInt found = 0;
+	for (TInt i = 0; i + 1 < 16 && banks[i + 1]; i += 2)
+		{
+		TUint32 base = banks[i], size = banks[i + 1];
+		aLog.Line(_L8("bank %08x size %08x"), base, size);
+		for (TUint32 at = base; at < base + size; at += KMaxRamWords * 4)
+			{
+			if (aProbe.PeekRam(at, buf, KMaxRamWords) != KErrNone)
+				continue;
+			for (TInt w = 0; w < KMaxRamWords; ++w)
+				{
+				TUint32 o[KOpaProxyWords];
+				TUint32 phys = at + w * 4;
+				if (buf[w] != KOpaProxyVt1 ||
+				    ReadRam(aProbe, phys, o, KOpaProxyWords) != KErrNone || o[1] != KOpaProxyVt2)
+					continue;
+				const TUint8* iid = (const TUint8*)&o[2];
+				TBuf8<128> line;
+				line.Format(_L8("%08x "), phys);
+				for (TInt b = 0; b < 16; ++b)
+					line.AppendFormat(_L8("%02x"), iid[b]);
+				line.AppendFormat(_L8(" %08x %08x"), o[7], o[8]);
+				for (TUint n = 0; n < sizeof(KOpaNames) / sizeof(KOpaNames[0]); ++n)
+					if (Mem::Compare(iid, 4, KOpaNames[n].iIid, 4) == 0)
+						{
+						TPtrC8 name((const TUint8*)KOpaNames[n].iName);
+						line.AppendFormat(_L8(" %S"), &name);
+						aLog.Line(_L8("%S"), &line);
+						}
+				line.Append(_L8("\r\n"));
+				f.Write(line);
+				++found;
+				}
+			}
+		}
+	f.Close();
+	delete[] buf;
+	aLog.Line(_L8("%d proxies in D:\\other\\opa.txt"), found);
+	}
+
 static TInt Run(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
 	{
 	TEntry trigger;
+	if (aFs.Entry(KOpaScanTrigger, trigger) == KErrNone)
+		{
+		OpaScan(aProbe, aLog, aFs);
+		aLog.Line(_L8("== done"));
+		return KErrNone;
+		}
 	if (aFs.Entry(KRamDumpTrigger, trigger) == KErrNone)
 		{
 		RamDump(aProbe, aLog, aFs);
