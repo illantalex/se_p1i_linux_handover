@@ -12,6 +12,6 @@ USERINCLUDE     ..\inc
 SYSTEMINCLUDE   \epoc32\include
 
 SOURCEPATH      ..\src
-SOURCE          regprobe_app.cpp
+SOURCE          regprobe_app.cpp opascan.cpp
 
 LIBRARY         euser.lib efsrv.lib hal.lib

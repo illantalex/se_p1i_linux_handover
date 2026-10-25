@@ -13,7 +13,7 @@ EPOCHEAPSIZE    0x1000 0x400000
 CAPABILITY      CommDD DiskAdmin
 
 SOURCEPATH      ..\src
-SOURCE          linuxhandover_app.cpp
+SOURCE          linuxhandover_app.cpp opascan.cpp
 
 USERINCLUDE     ..\inc
 

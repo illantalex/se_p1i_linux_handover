@@ -4,6 +4,7 @@
 // and hands over to it.
 
 #include "linuxhandover.h"
+#include "opascan.h"
 
 #include <e32base.h>
 #include <f32file.h>
@@ -195,6 +196,26 @@ static void MainL() {
     HBufC8* payloadBuf = HBufC8::NewLC(payloadSize);
     TPtr8 payloadPtr = payloadBuf->Des();
     User::LeaveIfError(payloadFile.Read(payloadPtr, payloadSize));
+
+    // The modem's OPA objects for Linux (vibrator, LEDs, battery record): their session and
+    // stub addresses are only valid for this Symbian boot, so scan for them now, through
+    // regprobe.ldd, into D:\other\opa.txt. A failure only costs those features in Linux.
+    {
+        RRegProbe probe;
+        TUint32 banks[16];
+        r = User::LoadLogicalDevice(KRegProbeLddFile);
+        if (r == KErrNone || r == KErrAlreadyExists)
+            r = probe.Open();
+        if (r == KErrNone) {
+            r = OpaRamBanks(probe, banks);
+            if (r == KErrNone)
+                r = OpaScanProxies(probe, fs, banks, NULL, NULL);
+            probe.Close();
+        }
+        logBuf.Format(_L8("OPA scan: %d (proxies, or error)\r\n"), r);
+        logFile.Write(logBuf);
+        logFile.Flush();
+    }
 
     TEntry noStream;
     if (fs.Entry(KNoStreamFile, noStream) == KErrNone) {

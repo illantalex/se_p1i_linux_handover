@@ -14,6 +14,7 @@
 #include <f32file.h>
 #include <hal.h>
 #include "regprobe.h"
+#include "opascan.h"
 
 _LIT(KLogFile, "C:\\regprobe.log");
 _LIT(KRomDumpDir, "D:\\other\\");
@@ -657,48 +658,10 @@ static void RamDump(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
 	delete[] buf;
 	}
 
-// BServer's proxies for the modem's OPA objects (CProxyCCPU, one per modem interface), so
-// that Linux can call those objects after the handover: the modem keeps running, and the
-// session and stub address it gave Symbian stay valid. Every proxy holds two ROM vtable
-// pointers in a row (X), then the interface IID (X + 8, 16 bytes), BServer's proxy/stub
-// manager (X + 0x18), the session (X + 0x1c) and the modem's stub address (X + 0x20); seen
-// in all 172 proxies of a RAM dump (2026-10-19). Started instead of the normal run when
-// D:\other\opascan.txt exists; one line per proxy in D:\other\opa.txt:
-// <phys> <IID bytes in memory order> <session> <stub> [name].
+// The modem's OPA objects for Linux: D:\other\opa.txt (see opascan.cpp), and then what
+// BServer recently asked them. Started instead of the normal run when D:\other\opascan.txt
+// exists. linuxhandover writes opa.txt itself before every handover.
 _LIT(KOpaScanTrigger, "D:\\other\\opascan.txt");
-_LIT(KOpaScanFile, "D:\\other\\opa.txt");
-const TUint32 KOpaProxyVt1 = 0xF818F384;
-const TUint32 KOpaProxyVt2 = 0xF818F3B4;
-const TInt KOpaProxyWords = 9;   // X .. X + 0x20
-
-struct TOpaName
-	{
-	TUint8 iIid[4];   // first bytes of the IID, enough to tell these apart
-	const char* iName;
-	};
-static const TOpaName KOpaNames[] =
-	{
-	{ { 0x06, 0x00, 0x7a, 0xb5 }, "IVibratorDevice" },
-	{ { 0x20, 0x56, 0x38, 0x85 }, "IUsbChargingControl" },
-	{ { 0x0d, 0x44, 0xbf, 0x86 }, "IIndicationDeviceManager" },
-	{ { 0x99, 0xeb, 0x8a, 0xf7 }, "ILedControlDevice" },
-	};
-
-// Reads aCount words of SDRAM, split where EPeekRam's 64 KB windows end.
-static TInt ReadRam(RRegProbe& aProbe, TUint32 aPhys, TUint32* aBuf, TInt aCount)
-	{
-	while (aCount > 0)
-		{
-		TInt n = Min(aCount, (TInt)((KRamWindow - (aPhys & (KRamWindow - 1))) / 4));
-		TInt r = aProbe.PeekRam(aPhys, aBuf, n);
-		if (r != KErrNone)
-			return r;
-		aPhys += n * 4;
-		aBuf += n;
-		aCount -= n;
-		}
-	return KErrNone;
-	}
 
 // What BServer recently asked the modem: its request PDUs (INVOKE: 8, session, request id,
 // stub, 0, method, arguments) stay in freed heap buffers until reused. Every place in RAM
@@ -711,19 +674,11 @@ static TInt ReadRam(RRegProbe& aProbe, TUint32 aPhys, TUint32* aBuf, TInt aCount
 // regprobe runs (e.g. plugging in USB, to see which calls start the charging: the log
 // says when) is caught before its buffers are reused.
 _LIT(KOpaReqFile, "D:\\other\\opa_req.txt");
-const TInt KOpaMaxProxies = 512;
 const TInt KOpaMaxRequests = 20000;
 const TInt KOpaReqSeconds = 60;
 const TUint32 KOpaMaxMethod = 0x100;
 const TUint32 KOpaInvoke = 8;
 const TInt KOpaReqBytes = 24 + 32;   // header + method, then 32 bytes
-
-struct TOpaProxy
-	{
-	TUint32 iIid;   // first 4 bytes of the IID
-	TUint32 iSession;
-	TUint32 iStub;
-	};
 
 static TUint32 Le32(const TUint8* aP)
 	{
@@ -771,7 +726,7 @@ static void OpaRequestScan(RRegProbe& aProbe, TLog& aLog, RFs& aFs, const TUint3
 					if (!inside)
 						{
 						// read from the word boundary, then pick the PDU out of it
-						if (ReadRam(aProbe, phys & ~3u, req, sizeof(req) / 4) != KErrNone)
+						if (OpaReadRam(aProbe, phys & ~3u, req, sizeof(req) / 4) != KErrNone)
 							continue;
 						p = (const TUint8*)req + (phys & 3);
 						}
@@ -805,74 +760,38 @@ static void OpaRequestScan(RRegProbe& aProbe, TLog& aLog, RFs& aFs, const TUint3
 static void OpaScan(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
 	{
 	aLog.Line(_L8("== opa scan"));
-	TKernelInfo k;
-	TUint32 sp[12], banks[16];
-	if (aProbe.KernelInfo(k) != KErrNone || aProbe.PeekVirt(k.iSuperPage, sp, 12) != KErrNone ||
-	    aProbe.PeekVirt(sp[5], banks, 16) != KErrNone)
+	TUint32 banks[16];
+	if (OpaRamBanks(aProbe, banks) != KErrNone)
 		{
 		aLog.Line(_L8("no RAM bank list"));
 		return;
 		}
-	RFile f;
-	TInt r = f.Replace(aFs, KOpaScanFile, EFileWrite);
-	if (r != KErrNone)
-		{
-		aLog.Line(_L8("opa file: %d"), r);
-		return;
-		}
 	TUint32* buf = new TUint32[KMaxRamWords];
-	if (!buf)
-		{
-		f.Close();
-		aLog.Line(_L8("no memory"));
-		return;
-		}
-	TInt found = 0;
 	TOpaProxy* proxies = new TOpaProxy[KOpaMaxProxies];
-	for (TInt i = 0; i + 1 < 16 && banks[i + 1]; i += 2)
+	HBufC8* named = HBufC8::New(1024);
+	if (!buf || !proxies || !named)
 		{
-		TUint32 base = banks[i], size = banks[i + 1];
-		aLog.Line(_L8("bank %08x size %08x"), base, size);
-		for (TUint32 at = base; at < base + size; at += KMaxRamWords * 4)
-			{
-			if (aProbe.PeekRam(at, buf, KMaxRamWords) != KErrNone)
-				continue;
-			for (TInt w = 0; w < KMaxRamWords; ++w)
-				{
-				TUint32 o[KOpaProxyWords];
-				TUint32 phys = at + w * 4;
-				if (buf[w] != KOpaProxyVt1 ||
-				    ReadRam(aProbe, phys, o, KOpaProxyWords) != KErrNone || o[1] != KOpaProxyVt2)
-					continue;
-				if (proxies && found < KOpaMaxProxies)
-					{
-					proxies[found].iIid = o[2];
-					proxies[found].iSession = o[7];
-					proxies[found].iStub = o[8];
-					}
-				const TUint8* iid = (const TUint8*)&o[2];
-				TBuf8<128> line;
-				line.Format(_L8("%08x "), phys);
-				for (TInt b = 0; b < 16; ++b)
-					line.AppendFormat(_L8("%02x"), iid[b]);
-				line.AppendFormat(_L8(" %08x %08x"), o[7], o[8]);
-				for (TUint n = 0; n < sizeof(KOpaNames) / sizeof(KOpaNames[0]); ++n)
-					if (Mem::Compare(iid, 4, KOpaNames[n].iIid, 4) == 0)
-						{
-						TPtrC8 name((const TUint8*)KOpaNames[n].iName);
-						line.AppendFormat(_L8(" %S"), &name);
-						aLog.Line(_L8("%S"), &line);
-						}
-				line.Append(_L8("\r\n"));
-				f.Write(line);
-				++found;
-				}
-			}
+		aLog.Line(_L8("no memory"));
 		}
-	f.Close();
-	aLog.Line(_L8("%d proxies in D:\\other\\opa.txt"), found);
-	if (proxies)
-		OpaRequestScan(aProbe, aLog, aFs, banks, buf, proxies, Min(found, KOpaMaxProxies));
+	else
+		{
+		TPtr8 namedPtr = named->Des();
+		TInt found = OpaScanProxies(aProbe, aFs, banks, proxies, &namedPtr);
+		// one log line per named proxy (the log adds its own line ends)
+		while (namedPtr.Length() > 0)
+			{
+			TInt end = namedPtr.Find(_L8("\r\n"));
+			if (end < 0)
+				break;
+			TPtrC8 line = namedPtr.Left(end);
+			aLog.Line(_L8("%S"), &line);
+			namedPtr.Delete(0, end + 2);
+			}
+		aLog.Line(_L8("%d proxies in D:\\other\\opa.txt"), found);
+		if (found > 0)
+			OpaRequestScan(aProbe, aLog, aFs, banks, buf, proxies, Min(found, KOpaMaxProxies));
+		}
+	delete named;
 	delete[] proxies;
 	delete[] buf;
 	}
