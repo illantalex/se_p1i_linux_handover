@@ -700,6 +700,108 @@ static TInt ReadRam(RRegProbe& aProbe, TUint32 aPhys, TUint32* aBuf, TInt aCount
 	return KErrNone;
 	}
 
+// What BServer recently asked the modem: its request PDUs (INVOKE: 8, session, request id,
+// stub, 0, method, arguments) stay in freed heap buffers until reused. Every place in RAM
+// where an INVOKE starts with one of the proxies' session and stub goes to
+// D:\other\opa_req.txt: <pass> <phys> <IID, first 4 bytes> <request id> <method> and the
+// next 32 bytes (the arguments, and whatever follows them). Halfword steps: in a CAIF
+// payload the PDU follows the channel and segment bytes. Records whose "method" is not a
+// small number are other structures that start the same way, and are left out. The scan
+// repeats for KOpaReqSeconds (a pass takes about 10 s), so that something done while
+// regprobe runs (e.g. plugging in USB, to see which calls start the charging: the log
+// says when) is caught before its buffers are reused.
+_LIT(KOpaReqFile, "D:\\other\\opa_req.txt");
+const TInt KOpaMaxProxies = 512;
+const TInt KOpaMaxRequests = 20000;
+const TInt KOpaReqSeconds = 60;
+const TUint32 KOpaMaxMethod = 0x100;
+const TUint32 KOpaInvoke = 8;
+const TInt KOpaReqBytes = 24 + 32;   // header + method, then 32 bytes
+
+struct TOpaProxy
+	{
+	TUint32 iIid;   // first 4 bytes of the IID
+	TUint32 iSession;
+	TUint32 iStub;
+	};
+
+static TUint32 Le32(const TUint8* aP)
+	{
+	return aP[0] | aP[1] << 8 | aP[2] << 16 | (TUint32)aP[3] << 24;
+	}
+
+static void OpaRequestScan(RRegProbe& aProbe, TLog& aLog, RFs& aFs, const TUint32* aBanks,
+                           TUint32* aBuf, const TOpaProxy* aProxies, TInt aCount)
+	{
+	RFile f;
+	if (f.Replace(aFs, KOpaReqFile, EFileWrite) != KErrNone)
+		{
+		aLog.Line(_L8("opa_req file failed"));
+		return;
+		}
+	TInt found = 0;
+	aLog.Line(_L8("request scan for %d s: plug USB in (or do what is to be traced) now"),
+	          KOpaReqSeconds);
+	TTime start, now;
+	TTimeIntervalSeconds secs;
+	start.UniversalTime();
+	TInt pass = 0;
+	do
+		{
+		++pass;
+		aLog.Line(_L8("request scan pass %d"), pass);
+		for (TInt i = 0; i + 1 < 16 && aBanks[i + 1] && found < KOpaMaxRequests; i += 2)
+			{
+			TUint32 base = aBanks[i], size = aBanks[i + 1];
+			for (TUint32 at = base; at < base + size && found < KOpaMaxRequests;
+			     at += KMaxRamWords * 4)
+				{
+				if (aProbe.PeekRam(at, aBuf, KMaxRamWords) != KErrNone)
+					continue;
+				const TUint8* b = (const TUint8*)aBuf;
+				for (TInt off = 0; off + 8 <= KMaxRamWords * 4; off += 2)
+					{
+					if (Le32(b + off) != KOpaInvoke)
+						continue;
+					TUint32 req[(KOpaReqBytes + 3) / 4 + 1];
+					TUint32 phys = at + off;
+					const TUint8* p = b + off;
+					// all of it in this block: check session and stub before reading more
+					TBool inside = off + KOpaReqBytes <= KMaxRamWords * 4;
+					if (!inside)
+						{
+						// read from the word boundary, then pick the PDU out of it
+						if (ReadRam(aProbe, phys & ~3u, req, sizeof(req) / 4) != KErrNone)
+							continue;
+						p = (const TUint8*)req + (phys & 3);
+						}
+					TUint32 session = Le32(p + 4), stub = Le32(p + 12);
+					TInt n;
+					for (n = 0; n < aCount; ++n)
+						if (aProxies[n].iSession == session && aProxies[n].iStub == stub)
+							break;
+					if (n == aCount || Le32(p + 20) >= KOpaMaxMethod)
+						continue;
+					TBuf8<192> line;
+					const TUint8* iid = (const TUint8*)&aProxies[n].iIid;
+					line.Format(_L8("%d %08x %02x%02x%02x%02x req %08x method %d:"), pass, phys,
+					            iid[0], iid[1], iid[2], iid[3], Le32(p + 8), Le32(p + 20));
+					for (TInt k = 24; k < KOpaReqBytes; ++k)
+						line.AppendFormat(_L8(" %02x"), p[k]);
+					line.Append(_L8("\r\n"));
+					f.Write(line);
+					++found;
+					}
+				}
+			}
+		now.UniversalTime();
+		}
+	while (now.SecondsFrom(start, secs) == KErrNone && secs.Int() < KOpaReqSeconds &&
+	       found < KOpaMaxRequests);
+	f.Close();
+	aLog.Line(_L8("%d requests in %d passes in D:\\other\\opa_req.txt"), found, pass);
+	}
+
 static void OpaScan(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
 	{
 	aLog.Line(_L8("== opa scan"));
@@ -726,6 +828,7 @@ static void OpaScan(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
 		return;
 		}
 	TInt found = 0;
+	TOpaProxy* proxies = new TOpaProxy[KOpaMaxProxies];
 	for (TInt i = 0; i + 1 < 16 && banks[i + 1]; i += 2)
 		{
 		TUint32 base = banks[i], size = banks[i + 1];
@@ -741,6 +844,12 @@ static void OpaScan(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
 				if (buf[w] != KOpaProxyVt1 ||
 				    ReadRam(aProbe, phys, o, KOpaProxyWords) != KErrNone || o[1] != KOpaProxyVt2)
 					continue;
+				if (proxies && found < KOpaMaxProxies)
+					{
+					proxies[found].iIid = o[2];
+					proxies[found].iSession = o[7];
+					proxies[found].iStub = o[8];
+					}
 				const TUint8* iid = (const TUint8*)&o[2];
 				TBuf8<128> line;
 				line.Format(_L8("%08x "), phys);
@@ -761,8 +870,11 @@ static void OpaScan(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
 			}
 		}
 	f.Close();
-	delete[] buf;
 	aLog.Line(_L8("%d proxies in D:\\other\\opa.txt"), found);
+	if (proxies)
+		OpaRequestScan(aProbe, aLog, aFs, banks, buf, proxies, Min(found, KOpaMaxProxies));
+	delete[] proxies;
+	delete[] buf;
 	}
 
 static TInt Run(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
