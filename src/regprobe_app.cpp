@@ -757,6 +757,346 @@ static void OpaRequestScan(RRegProbe& aProbe, TLog& aLog, RFs& aFs, const TUint3
 	aLog.Line(_L8("%d requests in %d passes in D:\\other\\opa_req.txt"), found, pass);
 	}
 
+// Time-resolved version of the request scan: D:\other\opawatch.txt starts it (instead of the
+// normal run). One full pass finds the 4 KB blocks that hold request PDUs (BServer's heap,
+// whose freed cells the next requests reuse); then the whole range from the lowest to the
+// highest of them, 64 KB more on each side (at most KOpaWatchMaxBlocks blocks, else only
+// those blocks and their neighbours), is read over and over for KOpaWatchSeconds: a
+// request written anywhere in that heap is caught. Every PDU that is new at its place
+// (other request id, method or arguments) goes to D:\other\opa_watch.txt with the time in
+// ms since the watch began: <ms> <phys>[ F] <IID, first 4 bytes> req <id> method <m>: 32
+// bytes. "F": the request is inside a CAIF frame (0x16 0x00 before it), i.e. in a link layer
+// transmit buffer, whose blocks are watched as well: every frame on its way to the modem.
+// The first pass's PDUs are written with ms "base". Meant for one event, e.g. plugging in
+// USB: the sequence of calls it causes, in order.
+_LIT(KOpaWatchTrigger, "D:\\other\\opawatch.txt");
+_LIT(KOpaWatchFile, "D:\\other\\opa_watch.txt");
+const TInt KOpaWatchSeconds = 90;
+const TInt KOpaWatchMaxBlocks = 1024;	// 4 MB
+const TInt KOpaWatchMaxSeen = 4096;
+const TInt KOpaWatchMaxFrameBlocks = 48;
+
+_LIT8(KFramedMark, " F");
+_LIT8(KNoMark, "");
+
+struct TOpaSeen
+	{
+	TUint32 iPhys, iReq, iMethod, iSum;
+	};
+
+// The request PDUs in one block read into aBuf (only those wholly inside it): for each, if
+// it is new at its place, a log line. aMs < 0 writes "base".
+static TInt OpaWatchBlock(RFile& aFile, TUint32 aAt, const TUint32* aBuf,
+                          const TOpaProxy* aProxies, TInt aCount, TOpaSeen* aSeen,
+                          TInt& aSeenCount, TInt aMs, TInt* aFramed = NULL)
+	{
+	TInt logged = 0;
+	const TUint8* b = (const TUint8*)aBuf;
+	for (TInt off = 0; off + KOpaReqBytes <= KMaxRamWords * 4; off += 2)
+		{
+		if (Le32(b + off) != KOpaInvoke)
+			continue;
+		const TUint8* p = b + off;
+		TUint32 session = Le32(p + 4), stub = Le32(p + 12), method = Le32(p + 20);
+		TInt n;
+		for (n = 0; n < aCount; ++n)
+			if (aProxies[n].iSession == session && aProxies[n].iStub == stub)
+				break;
+		if (n == aCount || method >= KOpaMaxMethod)
+			continue;
+		// Inside a CAIF frame (channel 0x16, 0x00 before it): a link layer transmit buffer
+		// (CAIF mux, bridge driver), not BServer's heap
+		TBool framed = off >= 2 && b[off - 2] == 0x16 && b[off - 1] == 0x00;
+		if (framed && aFramed)
+			++*aFramed;
+		TUint32 phys = aAt + off, req = Le32(p + 8), sum = 0;
+		for (TInt k = 24; k < KOpaReqBytes; ++k)
+			sum = sum * 31 + p[k];
+		TInt i;
+		for (i = 0; i < aSeenCount; ++i)
+			if (aSeen[i].iPhys == phys)
+				break;
+		if (i < aSeenCount && aSeen[i].iReq == req && aSeen[i].iMethod == method &&
+		    aSeen[i].iSum == sum)
+			continue;
+		if (i == aSeenCount)
+			{
+			if (aSeenCount == KOpaWatchMaxSeen)
+				continue;
+			++aSeenCount;
+			}
+		aSeen[i].iPhys = phys;
+		aSeen[i].iReq = req;
+		aSeen[i].iMethod = method;
+		aSeen[i].iSum = sum;
+		TBuf8<200> line;
+		const TUint8* iid = (const TUint8*)&aProxies[n].iIid;
+		if (aMs < 0)
+			line.Copy(_L8("base"));
+		else
+			line.Format(_L8("%d"), aMs);
+		line.AppendFormat(_L8(" %08x%S %02x%02x%02x%02x req %08x method %d:"), phys,
+		                  framed ? &KFramedMark() : &KNoMark(), iid[0],
+		                  iid[1], iid[2], iid[3], req, method);
+		for (TInt k = 24; k < KOpaReqBytes; ++k)
+			line.AppendFormat(_L8(" %02x"), p[k]);
+		line.Append(_L8("\r\n"));
+		aFile.Write(line);
+		++logged;
+		}
+	return logged;
+	}
+
+static void OpaWatch(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
+	{
+	aLog.Line(_L8("== opa watch"));
+	TUint32 banks[16];
+	if (OpaRamBanks(aProbe, banks) != KErrNone)
+		{
+		aLog.Line(_L8("no RAM bank list"));
+		return;
+		}
+	TUint32* buf = new TUint32[KMaxRamWords];
+	TOpaProxy* proxies = new TOpaProxy[KOpaMaxProxies];
+	TUint32* blocks = new TUint32[KOpaWatchMaxBlocks];
+	TOpaSeen* seen = new TOpaSeen[KOpaWatchMaxSeen];
+	RFile f;
+	if (!buf || !proxies || !blocks || !seen ||
+	    f.Replace(aFs, KOpaWatchFile, EFileWrite) != KErrNone)
+		{
+		aLog.Line(_L8("no memory or no file"));
+		delete[] buf;
+		delete[] proxies;
+		delete[] blocks;
+		delete[] seen;
+		return;
+		}
+	TInt count = Min(OpaScanProxies(aProbe, aFs, banks, proxies, NULL), KOpaMaxProxies);
+	aLog.Line(_L8("%d proxies"), count);
+	TInt nblocks = 0, nseen = 0, base = 0, nframe = 0;
+	TUint32 frameBlocks[KOpaWatchMaxFrameBlocks];
+	const TUint32 KBlock = KMaxRamWords * 4;
+	TUint32 lowest = 0xffffffff, highest = 0;
+	// The full pass: blocks with request PDUs, and their neighbours
+	for (TInt i = 0; i + 1 < 16 && banks[i + 1] && count > 0; i += 2)
+		for (TUint32 at = banks[i]; at < banks[i] + banks[i + 1]; at += KBlock)
+			{
+			if (aProbe.PeekRam(at, buf, KMaxRamWords) != KErrNone)
+				continue;
+			TInt framedHere = 0;
+			TInt found = OpaWatchBlock(f, at, buf, proxies, count, seen, nseen, -1,
+			                           &framedHere);
+			base += found;
+			for (TInt d = -1; framedHere > 0 && d <= 1; ++d)
+				{
+				TUint32 blk = at + d * KBlock;
+				TInt k;
+				for (k = 0; k < nframe && frameBlocks[k] != blk; ++k)
+					;
+				if (k == nframe && nframe < KOpaWatchMaxFrameBlocks)
+					frameBlocks[nframe++] = blk;
+				}
+			if (found > 0)
+				{
+				lowest = Min(lowest, at);
+				highest = Max(highest, at);
+				}
+			for (TInt d = -1; found > 0 && d <= 1; ++d)
+				{
+				TUint32 blk = at + d * KBlock;
+				TInt k;
+				for (k = 0; k < nblocks && blocks[k] != blk; ++k)
+					;
+				if (k == nblocks && nblocks < KOpaWatchMaxBlocks)
+					blocks[nblocks++] = blk;
+				}
+			}
+	// The whole range instead, if it fits
+	const TUint32 KMargin = 16 * KBlock;
+	if (base > 0 && (highest - lowest) / KBlock + 1 + 2 * 16 <= (TUint32)KOpaWatchMaxBlocks)
+		{
+		TUint32 from = lowest > KMargin ? lowest - KMargin : 0;
+		nblocks = 0;
+		for (TUint32 at = from; at <= highest + KMargin; at += KBlock)
+			blocks[nblocks++] = at;
+		aLog.Line(_L8("watch range %08x-%08x"), from, highest + KMargin + KBlock);
+		}
+	// And the link layer's transmit buffers (requests inside CAIF frames)
+	for (TInt j = 0; j < nframe; ++j)
+		{
+		TInt k;
+		for (k = 0; k < nblocks && blocks[k] != frameBlocks[j]; ++k)
+			;
+		if (k == nblocks && nblocks < KOpaWatchMaxBlocks)
+			blocks[nblocks++] = frameBlocks[j];
+		aLog.Line(_L8("frame block %08x"), frameBlocks[j]);
+		}
+	aLog.Line(_L8("watch %d blocks (%d PDUs at the start) for %d s: plug USB in now"),
+	          nblocks, base, KOpaWatchSeconds);
+	TTime start, now;
+	start.UniversalTime();
+	TInt rounds = 0, logged = 0;
+	TInt64 us = 0;
+	do
+		{
+		now.UniversalTime();
+		us = now.MicroSecondsFrom(start).Int64();
+		for (TInt k = 0; k < nblocks; ++k)
+			if (aProbe.PeekRam(blocks[k], buf, KMaxRamWords) == KErrNone)
+				logged += OpaWatchBlock(f, blocks[k], buf, proxies, count, seen, nseen,
+				                        (TInt)(us / 1000));
+		++rounds;
+		}
+	while (us < (TInt64)KOpaWatchSeconds * 1000000);
+	f.Close();
+	aLog.Line(_L8("%d new PDUs in %d rounds (%d ms per round) in D:\\other\\opa_watch.txt"),
+	          logged, rounds, rounds ? (TInt)(us / 1000 / rounds) : 0);
+	delete[] buf;
+	delete[] proxies;
+	delete[] blocks;
+	delete[] seen;
+	}
+
+// Every frame Symbian sends the modem: D:\other\framewatch.txt starts it (instead of the
+// normal run). The link layer's transmit buffers sit at the same physical addresses in every
+// boot so far (found by the request watch: OPA requests inside CAIF frames at 0x80857b8e,
+// 0x80859dc8 and 0x80860e58, i.e. frames from 4 bytes before). Only those are read, every
+// few ms for KFrameWatchSeconds, and whenever one changes its first KFrameBytes go to
+// D:\other\frame_watch.txt: <ms> <buffer> <hex>, whatever channel or protocol the frame
+// carries (CAIF control, AT, OPA, ...). Light enough not to slow Symbian down.
+_LIT(KFrameWatchTrigger, "D:\\other\\framewatch.txt");
+_LIT(KFrameWatchFile, "D:\\other\\frame_watch.txt");
+const TInt KFrameWatchSeconds = 120;
+const TInt KFrameWords = 24;	// 96 bytes from the frame start
+const TUint32 KFrameBufs[] = { 0x80857b8a, 0x80859dc4, 0x80860e54 };
+const TInt KNumFrameBufs = sizeof(KFrameBufs) / sizeof(KFrameBufs[0]);
+
+static void FrameWatch(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
+	{
+	aLog.Line(_L8("== frame watch"));
+	RFile f;
+	if (f.Replace(aFs, KFrameWatchFile, EFileWrite) != KErrNone)
+		{
+		aLog.Line(_L8("no file"));
+		return;
+		}
+	TUint32 last[KNumFrameBufs][KFrameWords];
+	TUint32 cur[KFrameWords + 1];
+	Mem::FillZ(last, sizeof(last));
+	aLog.Line(_L8("frame watch for %d s: plug USB in now"), KFrameWatchSeconds);
+	TTime start, now;
+	start.UniversalTime();
+	TInt rounds = 0, logged = 0;
+	TInt64 us = 0;
+	do
+		{
+		now.UniversalTime();
+		us = now.MicroSecondsFrom(start).Int64();
+		for (TInt i = 0; i < KNumFrameBufs; ++i)
+			{
+			// word aligned read around the (halfword aligned) frame start
+			TUint32 at = KFrameBufs[i] & ~3u;
+			if (OpaReadRam(aProbe, at, cur, KFrameWords + 1) != KErrNone)
+				continue;
+			const TUint8* p = (const TUint8*)cur + (KFrameBufs[i] & 3);
+			if (Mem::Compare((const TUint8*)last[i], KFrameWords * 4, p, KFrameWords * 4) == 0)
+				continue;
+			Mem::Copy(last[i], p, KFrameWords * 4);
+			TBuf8<16 + 3 * KFrameWords * 4> line;
+			line.Format(_L8("%d %08x"), (TInt)(us / 1000), KFrameBufs[i]);
+			for (TInt k = 0; k < KFrameWords * 4; ++k)
+				line.AppendFormat(_L8(" %02x"), p[k]);
+			line.Append(_L8("\r\n"));
+			f.Write(line);
+			++logged;
+			}
+		++rounds;
+		User::After(2000);
+		}
+	while (us < (TInt64)KFrameWatchSeconds * 1000000);
+	f.Close();
+	aLog.Line(_L8("%d frames in %d rounds in D:\\other\\frame_watch.txt"), logged, rounds);
+	}
+
+// What Symbian does to the USB HS bridge (D2600, whose GPO2 = USB_HS_CH tells the modem to
+// charge from USB): D:\other\regwatch.txt starts it (checked first). Clock/power and GPIO
+// registers wired to the bridge are read every few ms for KRegWatchSeconds, and whenever one
+// changes all of them go to D:\other\reg_watch.txt: <ms> <values in KRegWatch order>.
+// GPI_05 (modem CTS) toggles all the time and is left out of the comparison.
+_LIT(KRegWatchTrigger, "D:\\other\\regwatch.txt");
+_LIT(KRegWatchFile, "D:\\other\\reg_watch.txt");
+const TInt KRegWatchSeconds = 120;
+const TUint32 KRegWatch[] =
+	{
+	0x40004064,	// USB_CTRL
+	0x40004080,	// MS_CTRL (MS/SD clock)
+	0x400040B8,	// PWM_CLK_CTRL
+	0x400040C4,	// SPI_CTRL: SPI2_CLK = HS_RST#, SPI2_DATIO = HS_INHIBIT
+	0x4005C000,	// PWM1_CTRL: PWM_OUT1 next to HS_POW in the schematic
+	0x40028000,	// P3_INP_STATE (GPI_02 = HS/FS#)
+	0x4002800C,	// P3_OUTP_STATE (GPO_13, GPO_18 = USB_SW_SHDN)
+	0x40028010,	// P2_DIR_STATE?
+	0x4002801C,	// P2_INP_STATE?
+	0x40028028	// P_MUX_STATE?
+	};
+const TInt KNumRegWatch = sizeof(KRegWatch) / sizeof(KRegWatch[0]);
+const TInt KRegWatchGpi = 5;		// index of P3_INP_STATE
+const TUint32 KRegWatchGpiMask = ~(1u << 5);
+
+static void RegWatch(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
+	{
+	aLog.Line(_L8("== reg watch"));
+	RFile f;
+	if (f.Replace(aFs, KRegWatchFile, EFileWrite) != KErrNone)
+		{
+		aLog.Line(_L8("no file"));
+		return;
+		}
+	TBuf8<16 + 9 * KNumRegWatch> line;
+	line.Copy(_L8("ms"));
+	for (TInt i = 0; i < KNumRegWatch; ++i)
+		line.AppendFormat(_L8(" %08x"), KRegWatch[i]);
+	line.Append(_L8("\r\n"));
+	f.Write(line);
+	TUint32 last[KNumRegWatch];
+	TUint32 cur[KNumRegWatch];
+	Mem::FillZ(last, sizeof(last));
+	aLog.Line(_L8("reg watch for %d s: plug USB in now"), KRegWatchSeconds);
+	TTime start, now;
+	start.UniversalTime();
+	TInt rounds = 0, logged = 0;
+	TInt64 us = 0;
+	do
+		{
+		now.UniversalTime();
+		us = now.MicroSecondsFrom(start).Int64();
+		TBool changed = rounds == 0;
+		for (TInt i = 0; i < KNumRegWatch; ++i)
+			{
+			if (aProbe.Peek(KRegWatch[i], cur[i]) != KErrNone)
+				cur[i] = 0xdeadbeef;
+			TUint32 mask = i == KRegWatchGpi ? KRegWatchGpiMask : ~0u;
+			if ((cur[i] ^ last[i]) & mask)
+				changed = ETrue;
+			}
+		if (changed)
+			{
+			Mem::Copy(last, cur, sizeof(cur));
+			line.Format(_L8("%d"), (TInt)(us / 1000));
+			for (TInt i = 0; i < KNumRegWatch; ++i)
+				line.AppendFormat(_L8(" %08x"), cur[i]);
+			line.Append(_L8("\r\n"));
+			f.Write(line);
+			++logged;
+			}
+		++rounds;
+		User::After(2000);
+		}
+	while (us < (TInt64)KRegWatchSeconds * 1000000);
+	f.Close();
+	aLog.Line(_L8("%d changes in %d rounds in D:\\other\\reg_watch.txt"), logged, rounds);
+	}
+
 static void OpaScan(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
 	{
 	aLog.Line(_L8("== opa scan"));
@@ -799,6 +1139,24 @@ static void OpaScan(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
 static TInt Run(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
 	{
 	TEntry trigger;
+	if (aFs.Entry(KRegWatchTrigger, trigger) == KErrNone)
+		{
+		RegWatch(aProbe, aLog, aFs);
+		aLog.Line(_L8("== done"));
+		return KErrNone;
+		}
+	if (aFs.Entry(KFrameWatchTrigger, trigger) == KErrNone)
+		{
+		FrameWatch(aProbe, aLog, aFs);
+		aLog.Line(_L8("== done"));
+		return KErrNone;
+		}
+	if (aFs.Entry(KOpaWatchTrigger, trigger) == KErrNone)
+		{
+		OpaWatch(aProbe, aLog, aFs);
+		aLog.Line(_L8("== done"));
+		return KErrNone;
+		}
 	if (aFs.Entry(KOpaScanTrigger, trigger) == KErrNone)
 		{
 		OpaScan(aProbe, aLog, aFs);
