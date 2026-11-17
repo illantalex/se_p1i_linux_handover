@@ -1018,50 +1018,128 @@ static void FrameWatch(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
 	aLog.Line(_L8("%d frames in %d rounds in D:\\other\\frame_watch.txt"), logged, rounds);
 	}
 
-// What Symbian does to the USB HS bridge (D2600, whose GPO2 = USB_HS_CH tells the modem to
-// charge from USB): D:\other\regwatch.txt starts it (checked first). Clock/power and GPIO
-// registers wired to the bridge are read every few ms for KRegWatchSeconds, and whenever one
-// changes all of them go to D:\other\reg_watch.txt: <ms> <values in KRegWatch order>.
-// GPI_05 (modem CTS) toggles all the time and is left out of the comparison.
-_LIT(KRegWatchTrigger, "D:\\other\\regwatch.txt");
-_LIT(KRegWatchFile, "D:\\other\\reg_watch.txt");
-const TInt KRegWatchSeconds = 120;
-const TUint32 KRegWatch[] =
+// Register watches: a trigger file on the card starts one (checked first). A table of
+// registers is read every KPeriodUs for KSeconds, and whenever one changes (bits outside its
+// mask do not count) all of them go to the log: <ms> <values in table order>.
+struct TWatchReg
 	{
-	0x40004064,	// USB_CTRL
-	0x40004080,	// MS_CTRL (MS/SD clock)
-	0x400040B8,	// PWM_CLK_CTRL
-	0x400040C4,	// SPI_CTRL: SPI2_CLK = HS_RST#, SPI2_DATIO = HS_INHIBIT
-	0x4005C000,	// PWM1_CTRL: PWM_OUT1 next to HS_POW in the schematic
-	0x40028000,	// P3_INP_STATE (GPI_02 = HS/FS#)
-	0x4002800C,	// P3_OUTP_STATE (GPO_13, GPO_18 = USB_SW_SHDN)
-	0x40028010,	// P2_DIR_STATE?
-	0x4002801C,	// P2_INP_STATE?
-	0x40028028	// P_MUX_STATE?
+	TUint32 iAddr;
+	TUint32 iMask;	// bits that count as a change
 	};
-const TInt KNumRegWatch = sizeof(KRegWatch) / sizeof(KRegWatch[0]);
-const TInt KRegWatchGpi = 5;		// index of P3_INP_STATE
-const TUint32 KRegWatchGpiMask = ~(1u << 5);
-
-static void RegWatch(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
+struct TWatch
 	{
+	const TText* iTrigger;
+	const TText* iFile;
+	const TWatchReg* iRegs;
+	TInt iCount;
+	TInt iSeconds;
+	TInt iPeriodUs;
+	const char* iHint;
+	};
+const TInt KMaxWatchRegs = 48;
+
+// USB charging (found: Symbian raises GPO_13 = the modem's USB_CH at each plug-in): clock and
+// GPIO registers every 2 ms. GPI_05 (modem CTS) toggles all the time.
+const TWatchReg KRegWatch[] =
+	{
+	{ 0x40004064, ~0u },		// USB_CTRL
+	{ 0x40004080, ~0u },		// MS_CTRL (MS/SD clock)
+	{ 0x400040B8, ~0u },		// PWM_CLK_CTRL
+	{ 0x400040C4, ~0u },		// SPI_CTRL: SPI2_CLK = HS_RST#, SPI2_DATIO = HS_INHIBIT
+	{ 0x4005C000, ~0u },		// PWM1_CTRL: PWM_OUT1 next to HS_POW in the schematic
+	{ 0x40028000, ~(1u << 5) },	// P3_INP_STATE (GPI_02 = HS/FS#)
+	{ 0x4002800C, ~0u },		// P3_OUTP_STATE (GPO_13, GPO_18 = USB_SW_SHDN)
+	{ 0x40028010, ~0u },		// P2_DIR_STATE?
+	{ 0x4002801C, ~0u },		// P2_INP_STATE?
+	{ 0x40028028, ~0u }		// P_MUX_STATE?
+	};
+
+// Display engine (DUM): what Symbian does to it around sleep, display off and on. Under Linux
+// it stops refreshing for good after STOP mode idle. Read every 100 ms only, so that Symbian
+// can still reach its own deep sleep while the watch runs. PWR_CTRL is logged, not compared.
+const TWatchReg KDumWatch[] =
+	{
+	{ 0x40004044, 0 },		// PWR_CTRL
+	{ 0x40004090, ~0u },		// DUMCLKCTRL
+	{ 0x4005C004, ~0u },		// PWM2_CTRL (backlight level)
+	{ 0x4002800C, ~(1u << 17) },	// P3_OUTP_STATE (GPO_09/10 backlight; GPO_17 = modem RTS)
+	{ 0x400BC000, ~0u },		// DUM main: CONF
+	{ 0x400BC004, ~0u },		// CTRL
+	{ 0x400BC008, ~0u },		// STAT
+	{ 0x400BC00C, ~0u },		// DECODE
+	{ 0x400BC010, ~0u },		// COM_BASE
+	{ 0x400BC014, ~0u },		// SYNC_C
+	{ 0x400BC018, ~0u },		// CLK_DIV
+	{ 0x400BC01C, ~0u },
+	{ 0x400BC020, ~0u },		// DIRTY_LOW
+	{ 0x400BC024, ~0u },		// DIRTY_HIGH
+	{ 0x400BC028, ~0u },		// FORMAT
+	{ 0x400BC02C, ~0u },
+	{ 0x400BC030, ~0u },		// WTCFG1
+	{ 0x400BC034, ~0u },		// RTCFG1
+	{ 0x400BC038, ~0u },		// WTCFG2
+	{ 0x400BC03C, ~0u },		// RTCFG2
+	{ 0x400BC040, ~0u },		// TCFG
+	{ 0x400BC044, ~0u },		// OUTP_FORMAT1
+	{ 0x400BC048, ~0u },		// OUTP_FORMAT2
+	{ 0x400BC04C, ~0u },		// SYNC_MODE
+	{ 0x400BC050, ~0u },		// SYNC_OUT_C
+	{ 0x400BC054, ~0u },
+	{ 0x400BC058, ~0u },
+	{ 0x400BC05C, ~0u },
+	{ 0x400B8000, ~0u },		// channel 0: MIN
+	{ 0x400B8004, ~0u },		// MAX
+	{ 0x400B8008, ~0u },		// CONF
+	{ 0x400B800C, ~0u },		// STAT
+	{ 0x400B8010, ~0u },		// CTRL
+	{ 0x400B8100, ~0u },		// channel 1
+	{ 0x400B8104, ~0u },
+	{ 0x400B8108, ~0u },
+	{ 0x400B810C, ~0u },
+	{ 0x400B8110, ~0u },
+	{ 0x400B8200, ~0u },		// channel 2
+	{ 0x400B8204, ~0u },
+	{ 0x400B8208, ~0u },
+	{ 0x400B820C, ~0u },
+	{ 0x400B8210, ~0u }
+	};
+
+const TWatch KWatches[] =
+	{
+	{ _S("D:\\other\\regwatch.txt"), _S("D:\\other\\reg_watch.txt"), KRegWatch,
+	  sizeof(KRegWatch) / sizeof(KRegWatch[0]), 120, 2000, "plug USB in now" },
+	{ _S("D:\\other\\dumwatch.txt"), _S("D:\\other\\dum_watch.txt"), KDumWatch,
+	  sizeof(KDumWatch) / sizeof(KDumWatch[0]), 300, 100000,
+	  "leave the phone until the display goes off, then wake it" }
+	};
+const TInt KNumWatches = sizeof(KWatches) / sizeof(KWatches[0]);
+
+static void RegWatch(RRegProbe& aProbe, TLog& aLog, RFs& aFs, const TWatch& aWatch)
+	{
+	TPtrC file(aWatch.iFile);
 	aLog.Line(_L8("== reg watch"));
+	if (aWatch.iCount > KMaxWatchRegs)
+		{
+		aLog.Line(_L8("too many registers"));
+		return;
+		}
 	RFile f;
-	if (f.Replace(aFs, KRegWatchFile, EFileWrite) != KErrNone)
+	if (f.Replace(aFs, file, EFileWrite) != KErrNone)
 		{
 		aLog.Line(_L8("no file"));
 		return;
 		}
-	TBuf8<16 + 9 * KNumRegWatch> line;
+	TBuf8<16 + 9 * KMaxWatchRegs> line;
 	line.Copy(_L8("ms"));
-	for (TInt i = 0; i < KNumRegWatch; ++i)
-		line.AppendFormat(_L8(" %08x"), KRegWatch[i]);
+	for (TInt i = 0; i < aWatch.iCount; ++i)
+		line.AppendFormat(_L8(" %08x"), aWatch.iRegs[i].iAddr);
 	line.Append(_L8("\r\n"));
 	f.Write(line);
-	TUint32 last[KNumRegWatch];
-	TUint32 cur[KNumRegWatch];
+	TUint32 last[KMaxWatchRegs];
+	TUint32 cur[KMaxWatchRegs];
 	Mem::FillZ(last, sizeof(last));
-	aLog.Line(_L8("reg watch for %d s: plug USB in now"), KRegWatchSeconds);
+	TPtrC8 hint((const TUint8*)aWatch.iHint);
+	aLog.Line(_L8("reg watch for %d s: %S"), aWatch.iSeconds, &hint);
 	TTime start, now;
 	start.UniversalTime();
 	TInt rounds = 0, logged = 0;
@@ -1071,30 +1149,31 @@ static void RegWatch(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
 		now.UniversalTime();
 		us = now.MicroSecondsFrom(start).Int64();
 		TBool changed = rounds == 0;
-		for (TInt i = 0; i < KNumRegWatch; ++i)
+		for (TInt i = 0; i < aWatch.iCount; ++i)
 			{
-			if (aProbe.Peek(KRegWatch[i], cur[i]) != KErrNone)
+			if (aProbe.Peek(aWatch.iRegs[i].iAddr, cur[i]) != KErrNone)
 				cur[i] = 0xdeadbeef;
-			TUint32 mask = i == KRegWatchGpi ? KRegWatchGpiMask : ~0u;
-			if ((cur[i] ^ last[i]) & mask)
+			if ((cur[i] ^ last[i]) & aWatch.iRegs[i].iMask)
 				changed = ETrue;
 			}
 		if (changed)
 			{
-			Mem::Copy(last, cur, sizeof(cur));
+			Mem::Copy(last, cur, aWatch.iCount * sizeof(TUint32));
 			line.Format(_L8("%d"), (TInt)(us / 1000));
-			for (TInt i = 0; i < KNumRegWatch; ++i)
+			for (TInt i = 0; i < aWatch.iCount; ++i)
 				line.AppendFormat(_L8(" %08x"), cur[i]);
 			line.Append(_L8("\r\n"));
 			f.Write(line);
 			++logged;
 			}
 		++rounds;
-		User::After(2000);
+		User::After(aWatch.iPeriodUs);
 		}
-	while (us < (TInt64)KRegWatchSeconds * 1000000);
+	while (us < (TInt64)aWatch.iSeconds * 1000000);
 	f.Close();
-	aLog.Line(_L8("%d changes in %d rounds in D:\\other\\reg_watch.txt"), logged, rounds);
+	TBuf8<64> name;
+	name.Copy(file);
+	aLog.Line(_L8("%d changes in %d rounds in %S"), logged, rounds, &name);
 	}
 
 static void OpaScan(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
@@ -1139,12 +1218,13 @@ static void OpaScan(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
 static TInt Run(RRegProbe& aProbe, TLog& aLog, RFs& aFs)
 	{
 	TEntry trigger;
-	if (aFs.Entry(KRegWatchTrigger, trigger) == KErrNone)
-		{
-		RegWatch(aProbe, aLog, aFs);
-		aLog.Line(_L8("== done"));
-		return KErrNone;
-		}
+	for (TInt i = 0; i < KNumWatches; ++i)
+		if (aFs.Entry(TPtrC(KWatches[i].iTrigger), trigger) == KErrNone)
+			{
+			RegWatch(aProbe, aLog, aFs, KWatches[i]);
+			aLog.Line(_L8("== done"));
+			return KErrNone;
+			}
 	if (aFs.Entry(KFrameWatchTrigger, trigger) == KErrNone)
 		{
 		FrameWatch(aProbe, aLog, aFs);
